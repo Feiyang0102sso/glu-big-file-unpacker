@@ -3,6 +3,9 @@ import logging
 import sys
 from pathlib import Path
 
+# === config area ===
+# now the .log file name is fixed, no longer need to modify by user
+LOGGER_NAME = "BigExtractor"
 
 class ColoredFormatter(logging.Formatter):
     """
@@ -36,11 +39,11 @@ class ColoredFormatter(logging.Formatter):
         return formatter.format(record)
 
 
-def setup_logger(name: str = "BigFileExtractor"):
+def setup_logger():
     """
     Initializes a logger with console handlers for both stdout and stderr.
     """
-    logger = logging.getLogger(name)
+    logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
@@ -74,7 +77,7 @@ def add_file_handler(log_path: Path):
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Get the global logger
-    logger = logging.getLogger("BigExtractor")
+    logger = logging.getLogger(LOGGER_NAME)
 
     # 1. Remove existing FileHandlers to avoid duplication or path conflicts
     for h in logger.handlers[:]:

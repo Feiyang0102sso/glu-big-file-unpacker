@@ -24,3 +24,6 @@ IDA_Disassemble_code/
 # --- tmp document files ---
 Document_tmp/
 
+# --- LOGS ---
+*.log
+

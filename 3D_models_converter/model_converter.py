@@ -89,9 +89,7 @@ def convert_single_bin(input_file, output_prefix):
         return True
 
     except Exception as e:
-        # 【关键修改】这里改成了 warning。
-        # 因为很多 bin 文件可能根本不是模型，解析失败是正常的。
-        # 这样控制台就不会一片红，也不会以为是程序崩了。
+        # warning if the file can not be processed
         logger.warning(f"Skipping file {Path(input_file).name}: {e}")
         return False
 
@@ -126,8 +124,7 @@ def process_directory(target_path_str):
 
     local_output_dir = target_path / CONVERTED_DIR_NAME
 
-    # 【关键修改】不再清空文件夹，只确保文件夹存在
-    # 如果文件已存在，write 操作会自动覆盖，很安全
+    # overwrite instead of cleaning
     try:
         local_output_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
@@ -152,7 +149,7 @@ def process_directory(target_path_str):
 
 def print_recommendations():
     """ Print final info """
-    # 强制刷新缓冲区，确保 Log 先打印出来，再打印这个横幅
+    # Force a buffer flush to ensure the Log is printed first, then the banner is printed.
     sys.stdout.flush()
     sys.stderr.flush()
 
@@ -174,10 +171,10 @@ def print_recommendations():
 def main():
     # Setup Logging
     output_dir = get_output_dir()
-    # log_file = ROOT_DIR / "extractor.log"
-    # add_file_handler(log_file)
-    #
-    # logger.info(f"App Started. Logs: {log_file}")
+    log_file = ROOT_DIR / "extractor.log"
+    add_file_handler(log_file)
+
+    logger.info(f"App Started. Logs: {log_file}")
 
     # Load Config
     targets = load_targets_from_config()
@@ -203,7 +200,7 @@ def main():
 
     print_recommendations()
 
-    # 【关键】再次强制刷新，防止 Input 提示出现在日志中间
+    # Force refresh again to prevent the Input prompt from appearing in the middle of the log.
     sys.stdout.flush()
     sys.stderr.flush()
     input("Press Enter to exit...")

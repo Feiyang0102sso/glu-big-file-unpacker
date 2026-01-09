@@ -1,7 +1,7 @@
 # /config.py
 import sys
 from pathlib import Path
-from logger import logger, add_file_handler
+from logger import logger, add_file_handler, LOGGER_NAME
 
 
 def get_app_root() -> Path:
@@ -26,7 +26,7 @@ ROOT_DIR = get_app_root()
 
 input_dir = ROOT_DIR / 'DATAS'
 output_dir = ROOT_DIR / 'OUTPUT'
-log_file_path = output_dir / "extractor.log"
+log_file_path = ROOT_DIR / "extractor.log"
 
 # --- Directory Helper Methods ---
 
@@ -58,7 +58,7 @@ def update_paths(new_input: str = None, new_output: str = None):
     if new_output:
         output_dir = Path(new_output).resolve()
 
-    log_file_path = output_dir / "extractor.log"
+    log_file_path = ROOT_DIR / "extractor.log"
 
     # Ensure output dir exists before adding file handler
     output_dir.mkdir(parents=True, exist_ok=True)
