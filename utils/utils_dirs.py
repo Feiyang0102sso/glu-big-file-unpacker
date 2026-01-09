@@ -1,4 +1,4 @@
-# /utils_dirs.py
+# utils/utils_dirs.py
 import shutil
 from pathlib import Path
 from logger import logger

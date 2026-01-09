@@ -8,7 +8,7 @@ __pycache__/
 .pytest_cache/
 
 # --- environment ---
-.venv_pack/
+.venv/
 
 # --- Test data ---
 DATAS/

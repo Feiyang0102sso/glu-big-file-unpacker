@@ -170,7 +170,7 @@ def print_recommendations():
 
 def main():
     # Setup Logging
-    output_dir = get_output_dir()
+    output_dir = get_output_dir(False) # avoid creating an empty folder
     log_file = ROOT_DIR / "extractor.log"
     add_file_handler(log_file)
 

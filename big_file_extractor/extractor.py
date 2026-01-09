@@ -1,17 +1,17 @@
 import zlib
 import struct
-import csv  # 导入csv模块
+import csv
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict
 
-from config import logger
+from logger import logger
 from big_archive import BigArchive
 from utils_file_type import FileTypeUtils
 
 
 class ResourceExtractor:
-    # 根据你的描述，添加一个资源哈希到类型的映射
+    # Mapping of resource hashes to types
     TYPE_MAP = {
         0x69e4c505: "string pack",
         0x69e5d35c: "meta data",
@@ -25,7 +25,7 @@ class ResourceExtractor:
         self.archive = archive
         self.output_dir = output_basedir / archive.filepath.stem
         self.stats = defaultdict(lambda: {"count": 0, "size": 0})
-        self.csv_data = []  # 新增：用于存储CSV行数据
+        self.csv_data = []  # store csv
 
     def extract_all(self):
         if not self.archive.parse():
@@ -37,24 +37,24 @@ class ResourceExtractor:
         logger.info(f"{'=' * 40}")
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.csv_data = []  # 每次提取时重置CSV数据
+        self.csv_data = []  # Reset CSV data on each extraction
 
         total_files = len(self.archive.toc)
         for i, entry in enumerate(self.archive.toc):
             self._extract_single_entry(i, entry)
 
         self._print_summary()
-        self.export_to_csv()  # 提取完成后自动导出CSV
+        self.export_to_csv()  # Automatically export CSV after extraction
 
     def _extract_single_entry(self, index: int, entry: Dict):
         res_hash = entry['hash']
         offset, block_size = self.archive.get_entry_data_info(index)
 
-        # --- 初始化CSV数据 ---
+        # --- initialize csv data ---
         csv_is_compressed_bool = False
         csv_compressed_size = 0
         csv_original_size = 0
-        csv_type = "unknown"  # 默认类型
+        csv_type = "unknown"  # default
 
         try:
             self.archive.file_handle.seek(offset)
@@ -63,7 +63,7 @@ class ResourceExtractor:
 
             compression_flag = std_header[2]
             is_compressed = (compression_flag & 0x80) != 0
-            csv_is_compressed_bool = is_compressed  # 记录是否压缩
+            csv_is_compressed_bool = is_compressed  # whether data compressed
 
             final_data = b''
             log_extra_info = ""
@@ -81,7 +81,7 @@ class ResourceExtractor:
                     final_data = extra_header
                     extension = ".bin"
                     log_extra_info = "(Placeholder/Reference)"
-                    csv_type = "ref"  # 根据描述，0KB的为 "ref"
+                    csv_type = "ref"  # 0kb can be seen as ref
                 else:
                     compressed_data = self.archive.file_handle.read(compressed_size)
                     try:
@@ -98,22 +98,22 @@ class ResourceExtractor:
                 data_len = max(0, block_size - 4)
                 final_data = self.archive.file_handle.read(data_len)
 
-                # 未压缩文件，原始大小=文件大小，压缩大小为0
+                # Uncompressed file, original size = file size, compressed size is 0.
                 csv_original_size = len(final_data)
-                csv_compressed_size = 0  # 明确设为0
+                csv_compressed_size = 0  # set to 0
 
                 extension = FileTypeUtils.guess_extension(final_data, res_hash)
                 csv_type = extension.lstrip('.')  # 初始类型为扩展名
                 log_extra_info = f"(Uncompressed: {len(final_data)} bytes)"
 
-            # --- 检查哈希表以覆盖类型 ---
+            # --- Check hash table for overlay type ---
             if res_hash in ResourceExtractor.TYPE_MAP:
                 csv_type = ResourceExtractor.TYPE_MAP[res_hash]
 
-            # --- 存储CSV行数据 ---
+            # --- Store CSV row data ---
             row = {
                 "id": index,
-                "section": "",  # 按要求留空
+                "section": "",  # leave blank
                 "sub_group": hex(res_hash),
                 "type": csv_type,
                 "Offset": hex(offset),
@@ -123,7 +123,7 @@ class ResourceExtractor:
             }
             self.csv_data.append(row)
 
-            # --- 磁盘写入部分 (不变) ---
+            # --- write to disk ---
             group_dir = self.output_dir / hex(res_hash)
             group_dir.mkdir(parents=True, exist_ok=True)
 
@@ -142,11 +142,11 @@ class ResourceExtractor:
 
         except Exception as e:
             logger.error(f"Failed to process entry at {hex(offset)}: {e}")
-            # 也可以选择在这里添加一个失败的行到CSV
+            # if writing to csv failed
             row = {
                 "id": index,
                 "section": "",
-                "所属子文件夹": hex(res_hash),
+                "sub_group": hex(res_hash),
                 "type": "ERROR",
                 "Offset": hex(offset),
                 "compressed?": "N/A",
@@ -167,17 +167,17 @@ class ResourceExtractor:
 
     def export_to_csv(self):
         """
-        新增方法：将收集到的资源数据导出到CSV文件。
+        export data into a csv file
         """
         if not self.csv_data:
             logger.info("No resource data to export to CSV.")
             return
 
-        # CSV文件名以.big文档名+.csv
+        # CSV filenames begin with .bigdocumentname + .csv
         csv_filename = self.archive.filepath.stem + "_resources.csv"
         csv_path = self.output_dir / csv_filename
 
-        # CSV列标题
+        # CSV cols
         headers = [
             "id", "section", "sub_group", "type", "Offset",
             "compressed?", "compressed size", "original size"
@@ -186,7 +186,6 @@ class ResourceExtractor:
         logger.info(f"Exporting resource manifest to {csv_path}...")
         try:
             with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                # 使用 utf-8-sig 编码确保Excel能正确打开包含非ASCII字符（如中文）的CSV
                 writer = csv.DictWriter(f, fieldnames=headers)
                 writer.writeheader()
                 writer.writerows(self.csv_data)
