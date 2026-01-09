@@ -1,0 +1,26 @@
+# --- IDE configuration file ---
+.idea/
+
+# --- Python cached files (standard ignore) ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# --- environment ---
+.venv_pack/
+
+# --- Test data ---
+DATAS/
+
+# --- pyinstaller files ---
+*.spec
+dist/
+build/
+
+# --- decompile file from IDA ---
+IDA_Disassemble_code/
+
+# --- tmp document files ---
+Document_tmp/
+

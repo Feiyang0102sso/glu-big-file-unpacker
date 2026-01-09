@@ -1,0 +1,1 @@
+pyinstaller -F "3D_models_converter/model_converter.py" --paths . --name "ModelConverter" --clean
