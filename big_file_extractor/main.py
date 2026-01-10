@@ -9,7 +9,7 @@ from extractor import ResourceExtractor
 
 def natural_sort_key(path):
     """
-    使文件按数字顺序排序，例如 8, 9, 10, 11 ...
+    Sort the files in numerical order, for example, 8, 9, 10, 11....
     """
     return [int(text) if text.isdigit() else text.lower()
             for text in re.split(r'(\d+)', path.name)]

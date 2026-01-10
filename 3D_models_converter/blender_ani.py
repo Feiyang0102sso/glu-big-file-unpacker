@@ -1,74 +1,85 @@
 import bpy
 import json
-import os
 
-# --- 配置路径 ---
-# 请修改为你的文件所在的实际文件夹路径
-FILE_PATH = r"D:\python coding\big_asserts\3D_reproduct"
-OBJ_NAME = "output_pustank_gun_base.obj"
-JSON_NAME = "output_pustank_gun_anim.json"
+"""
+!! Apply foe Blender 5.0 !!
+use in blender script area, copy and run it (Alt+P)
+Ctrl + T = switch between animation timeline in seconds / frames ()
+Home = Extended animation timeline length
+Space = play/stop animation 
+"""
+
+# === config area ===
+json_path = r"D:\python coding\big_asserts\DATAS\model360\pack1\pack1_xga_0273_0x7923b9.json"
+target_fps = 60 # adjust frame speed
+time_scale = 2.5  # adjust speed : 2.0 means slowing down by half, 0.5 means speeding up by half.
 
 
-def import_glu_animation():
-    # 1. 导入基础模型
-    full_obj_path = os.path.join(FILE_PATH, OBJ_NAME)
-    bpy.ops.wm.obj_import(filepath=full_obj_path)
-    obj = bpy.context.selected_objects[0]
-    mesh = obj.data
+def import_v_anim():
+    obj = bpy.context.active_object
+    if not obj or obj.type != 'MESH':
+        print("Error: Please select the model first! ")
+        return
 
-    # 2. 加载动画 JSON
-    with open(os.path.join(FILE_PATH, JSON_NAME), 'r') as f:
+    # Set scene frame rate
+    bpy.context.scene.render.fps = target_fps
+
+    with open(json_path, 'r') as f:
         data = json.load(f)
+    frames = data.get('frames', [])
 
-    frames = data["frames"]
-    fps = 30  # 假设为 30fps，可根据 time_ms 调整
-
-    # 3. 创建形态键 (Shape Keys)
-    # 首先创建 Basis 键
-    if not mesh.shape_keys:
+    # Initialize the form key
+    if not obj.data.shape_keys:
         obj.shape_key_add(name="Basis")
 
-    # 4. 遍历每一帧，创建形态键并打关键帧
-    print(f"开始处理 {len(frames)} 帧动画...")
+    # Clear old animation data
+    if obj.data.shape_keys.animation_data:
+        obj.data.shape_keys.animation_data_clear()
 
-    for i, frame in enumerate(frames):
-        # 这里的 time_ms 转换为 Blender 帧数 (假设 1000ms = 30帧)
-        current_blender_frame = int(frame["time"] * fps / 1000)
+    # Core logic: Frame-by-frame import
+    for i, frame_data in enumerate(frames):
+        time_ms = frame_data['time']
+        vertices = frame_data['vertices']
 
-        # 创建该帧的形态键
-        sk_name = f"Frame_{i:03d}"
-        sk = obj.shape_key_add(name=sk_name)
+        # Calculate the target frame (apply time scaling).
+        target_frame = (time_ms / 1000.0) * target_fps * time_scale
 
-        # 更新该形态键的顶点位置
-        # 注意：Blender 顶点顺序必须与导出时一致
-        for j, pos in enumerate(frame["vertices"]):
-            sk.data[j].co = pos
+        # Get or create shape keys
+        sk_name = f"Anim_Key_{i:03d}"
+        sk = obj.data.shape_keys.key_blocks.get(sk_name) or obj.shape_key_add(name=sk_name)
 
-        # 在时间轴上驱动这个形态键
-        # 在当前帧，该键的权重为 1.0，前一帧和后一帧为 0.0
+        # Update vertex position
+        # If the model orientation is incorrect,
+        # modify the coordinates here, for example (v[0], v[2], -v[1]).
+        for v_idx, v_coords in enumerate(vertices):
+            if v_idx < len(sk.data):
+                sk.data[v_idx].co = (v_coords[0], v_coords[1], v_coords[2])
+
+        # --- Keyframe setting logic: Resolving flickering ---
+
+        # 1. At the current time point, the weight is set to 1.0.
         sk.value = 1.0
-        sk.keyframe_insert(data_path="value", frame=current_blender_frame)
+        kf_current = sk.keyframe_insert(data_path='value', frame=target_frame)
 
-        sk.value = 0.0
-        sk.keyframe_insert(data_path="value", frame=current_blender_frame - 1)
-        sk.keyframe_insert(data_path="value", frame=current_blender_frame + 1)
+        # 2. At the time point of the previous frame,
+        # the weight is set to 0.0 (to prevent animation overlap).
+        if i > 0:
+            prev_frame = (frames[i - 1]['time'] / 1000.0) * target_fps * time_scale
+            sk.value = 0.0
+            sk.keyframe_insert(data_path='value', frame=prev_frame)
 
-    # 5. 处理 UA 节点 (骨架展示)
-    # 创建骨架对象来显示节点轨迹
-    arm_data = bpy.data.armatures.new("Skeleton")
-    arm_obj = bpy.data.objects.new("Skeleton_Object", arm_data)
-    bpy.context.collection.objects.link(arm_obj)
+        # 3. At the next frame's time point, the weight is set to 0.0.
+        if i < len(frames) - 1:
+            next_frame = (frames[i + 1]['time'] / 1000.0) * target_fps * time_scale
+            sk.value = 0.0
+            sk.keyframe_insert(data_path='value', frame=next_frame)
 
-    # 这一步仅作为可视化节点使用
-    for node_info in data["metadata"]["nodes"]:
-        bpy.context.view_layer.objects.active = arm_obj
-        bpy.ops.object.mode_set(mode='EDIT')
-        bone = arm_data.edit_bones.new(node_info)
-        bone.head = (0, 0, 0)
-        bone.tail = (0, 0, 0.1)  # 默认长度
-        bpy.ops.object.mode_set(mode='OBJECT')
+    # Automatically set playback range
+    bpy.context.scene.frame_start = 0
+    bpy.context.scene.frame_end = int((frames[-1]['time'] / 1000.0) * target_fps * time_scale)
 
-    print("动画导入完成！按下 Space 键播放。")
+    print(f"Import complete! Total {len(frames)} frames")
 
 
-import_glu_animation()
+# 执行
+import_v_anim()
