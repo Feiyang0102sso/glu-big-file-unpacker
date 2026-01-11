@@ -2,7 +2,7 @@ import bpy
 import json
 
 """
-!! Apply foe Blender 5.0 !!
+!! Apply for Blender 5.0 !!
 use in blender script area, copy and run it (Alt+P)
 Ctrl + T = switch between animation timeline in seconds / frames ()
 Home = Extended animation timeline length
