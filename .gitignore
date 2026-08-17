@@ -17,6 +17,7 @@ DATAS/
 *.spec
 dist/
 build/
+*.egg-info/
 
 # --- decompile file from IDA ---
 IDA_Disassemble_code/
