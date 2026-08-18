@@ -4,7 +4,7 @@
 //      File: string_pack.bt
 //   Authors: Feiyang 
 //   Version: 1.0
-//   Purpose: Read the header and entry end offsets of a string_pack.
+//   Purpose: Read the header and entry index offsets of a string_pack.
 //  Category: Game / Big Assets
 // File Mask: *.bin
 //------------------------------------------------
@@ -22,8 +22,8 @@ LittleEndian();
 const int COLOR_MAGIC = 0xFFD1DC;
 const int COLOR_ENTRY_COUNT = 0xD1FFD6;
 const int COLOR_FIRST_ENTRY_ID = 0xE226FF;
-const int COLOR_FIRST_ENTRY_OFFSET = 0xFFF0B3;
-const int COLOR_ENTRY_END_OFFSET = 0xB0E0FF;
+const int COLOR_ENTRY_INDEX_OFFSET = 0xFFF0B3;
+const int COLOR_FINAL_END_OFFSET = 0xB0E0FF;
 const int COLOR_RESOURCE_TYPE = 0xE0B0FF;
 
 const int COLOR_STRING_PREFIX = 0x223BC2;
@@ -32,23 +32,20 @@ const int COLOR_STRING_TERMINATOR = 0x007D5E;
 
 
 // ------------------------------------------------
-// Part 1: 8 bytes header
+// Part 1: 4 or 6 bytes header
 // ------------------------------------------------
 
 struct StringPackHeader {
     ubyte magic[2] <format=hex, bgcolor=COLOR_MAGIC>;
     uint16 entryCount <bgcolor=COLOR_ENTRY_COUNT>;
-    uint16 firstEntryId <format=hex, bgcolor=COLOR_FIRST_ENTRY_ID>;
-    // entry 0 starts at file offset 0xXXXX.
-    uint16 firstEntryOffset <format=hex, bgcolor=COLOR_FIRST_ENTRY_OFFSET>;
 };
 
 
 // ------------------------------------------------
-// Part 2: end offset of every entry
+// Part 2: index offset of every entry
 // ------------------------------------------------
 
-// 00 20: entry ID + 16-bit end offset.
+// entry 0 starts at file offset 0xXXXX.
 
 /*
 Bitmask Flags:
@@ -57,22 +54,25 @@ Bitmask Flags:
 0x2000 - With own ID?
 */
 
+// 00 20: entry ID + 16-bit entry index offset.
 // why it is here? I suppose it can store non-continous IDs
 struct EntryIndex_0020 {
     uint16 entryId <format=hex, bgcolor=COLOR_FIRST_ENTRY_ID>;
-    uint16 endOffset <format=hex, bgcolor=COLOR_ENTRY_END_OFFSET>;
+    uint16 entryIndexOffset <format=hex, bgcolor=COLOR_ENTRY_INDEX_OFFSET>;
 };
 
-// 00 A0: standard 16-bit end offset.
+// 00 A0: standard 16-bit entry index offset.
 struct EntryOffset_00A0 {
-    uint16 endOffset <format=hex, bgcolor=COLOR_ENTRY_END_OFFSET>;
+    uint16 entryIndexOffset <format=hex, bgcolor=COLOR_ENTRY_INDEX_OFFSET>;
 };
 
 // 00 E0: high 16 bits + low 16 bits of the end offset.
 // no idea why it insert 00 00 as high...
+// In current samples, the first 16-bit value is the entry index offset;
+// the second 16-bit value is unknown.
 struct EntryOffset_00E0 {
-    uint16 offsetHigh <format=hex>;
-    uint16 offsetLow <format=hex, bgcolor=COLOR_ENTRY_END_OFFSET>;
+    uint16 entryIndexOffset <format=hex, bgcolor=COLOR_ENTRY_INDEX_OFFSET>;
+    uint16 reserved <format=hex>;
 };
 
 // ------------------------------------------------
@@ -124,26 +124,28 @@ struct StringEntry {
 StringPackHeader header;
 
 if (header.magic[1] == 0x20) {
-    EntryIndex_0020 entryIndexes[header.entryCount - 1]
+    EntryIndex_0020 entryIndexes[header.entryCount]
         <optimize=false>;
-
-    uint16 finalEndOffset_0020
-        <format=hex, bgcolor=COLOR_ENTRY_END_OFFSET>;
 }
 else if (header.magic[1] == 0xA0) {
-    EntryOffset_00A0 entryEndOffsets[header.entryCount]
+    uint16 firstEntryId <format=hex, bgcolor=COLOR_FIRST_ENTRY_ID>;
+
+    EntryOffset_00A0 entryIndexOffsets[header.entryCount]
         <optimize=false>;
 }
 else if (header.magic[1] == 0xE0) {
-    EntryOffset_00E0 entryEndOffsets[header.entryCount]
+    uint16 firstEntryId <format=hex, bgcolor=COLOR_FIRST_ENTRY_ID>;
+
+    EntryOffset_00E0 entryIndexOffsets[header.entryCount]
         <optimize=false>;
 }
 else {
     Warning("Unknown string_pack format.");
 }
 
-// unknown
-uint16 typeTableReserved <format=hex>;
+// Final end offset followed by a reserved 16-bit value.
+uint16 finalEndOffset <format=hex, bgcolor=COLOR_FINAL_END_OFFSET>;
+uint16 finalEndOffsetReserved <format=hex>;
 
 EntryResourceType entryResourceTypes[header.entryCount]
     <bgcolor=COLOR_RESOURCE_TYPE, optimize=false>;
