@@ -1,0 +1,120 @@
+//------------------------------------------------
+//--- 010 Editor v15.0.2 Binary Template
+//
+//      File: GB_save_1000.bt
+//   Authors: Feiyang
+//   Version: 1.0
+//   Purpose: Gun Bros Save -1_1000 Based on iOS 3.6.0
+//            Player progress save
+//  Category: Game
+// File Mask: -1_1000
+//------------------------------------------------
+
+/*
+    !!!warning!!! 
+        vary among versions
+
+    Padding:
+        Random garbage is inserted before and after the 48-byte payload.
+        It is wrapper padding, not player progress data.
+
+    Checksum:
+        CRC-32/BZIP2 over fileBytes[0 .. FileSize() - 5].
+        poly=0x04C11DB7, init=0xFFFFFFFF, refin=false,
+        refout=false, xorout=0xFFFFFFFF. Stored as little-endian uint32.
+*/
+
+LittleEndian();
+
+// color palette
+const int COLOR_HEADER = 0xF7FFF8;
+const int COLOR_WRAPPER = 0x90959A;
+const int COLOR_PREFIX_SIZE = 0xFFB37C;
+const int COLOR_PLAYER_STATE = 0xFF729A;
+const int COLOR_XPLODIUM = 0xFFF4CC;
+const int COLOR_XPLODIUM_HIGH = 0xFFF4CC;
+const int COLOR_COINS = 0xFFE699;
+const int COLOR_COINS_HIGH = 0xFFE699;
+const int COLOR_WARBUCKS = 0xFFCC66;
+const int COLOR_TOTAL_EXPERIENCE = 0xEAD7FF;
+const int COLOR_PLAYER_LEVEL = 0xD8B4FE;
+const int COLOR_XP_BONUS_TIMESTAMP = 0xC4A7FF;
+const int COLOR_XP_BONUS_QUANTITY = 0xA78BFA;
+const int COLOR_FLAGS = 0xB0FFB0;
+const int COLOR_RESERVED = 0x66C9FF;
+const int COLOR_FOOTER = 0x68FF9F;
+
+const int EXPECTED_FILE_SIZE = 536;
+const int PLAYER_PROGRESS_SIZE = 48;
+
+// Header, fixed 0x08 bytes.
+struct HeaderData {
+    int32  version;    // seems all 0
+    uint32 flag;       // seems all 0
+};
+
+// Random prefix block. The payload starts immediately after this structure.
+struct PrefixData {
+    uint32 prefixSize <bgcolor=COLOR_PREFIX_SIZE>; // fixed for this save
+    ubyte  randomPrefix[prefixSize];
+};
+
+// CPlayerProgress payload, fixed 0x30 bytes.
+struct PlayerProgressPayload {
+    ubyte  firstLaunch <bgcolor=COLOR_PLAYER_STATE>;          // gbFirstLaunch 0/1 reset to tutorial (buggy)
+    ubyte  alignmentPadding1[3] <bgcolor=COLOR_RESERVED>;
+
+    // save use 64 byte, but game use only int32...
+    int32  xplodium <bgcolor=COLOR_XPLODIUM>;                 // gbExplodium low 32 bits, displayed value caps at int32 max
+    uint32 xplodiumHigh <bgcolor=COLOR_XPLODIUM_HIGH>;        // high 32 bits, usually 0; observed 1 after overflow
+    int32  coins <bgcolor=COLOR_COINS>;                       // gbCurrencyCommon low 32 bits, displayed value caps at int32 max
+    uint32 coinsHigh <bgcolor=COLOR_COINS_HIGH>;              // high 32 bits, usually 0; observed 1 after overflow
+    uint32 warBucks <bgcolor=COLOR_WARBUCKS>;                 // gbCurrencyRare
+
+    uint64 totalExperience <bgcolor=COLOR_TOTAL_EXPERIENCE>;  // gbExperience, cumulative XP
+    uint16 playerLevel <bgcolor=COLOR_PLAYER_LEVEL>;          // gbLevel
+    ubyte  alignmentPadding2[2] <bgcolor=COLOR_RESERVED>;
+
+    uint32 xpBonusTimestamp <bgcolor=COLOR_XP_BONUS_TIMESTAMP>; // gbXPBonusTimestamp
+    uint32 xpBonusQuantity <bgcolor=COLOR_XP_BONUS_QUANTITY>;   // gbXPBonusQuantity
+
+    ubyte  serverDataComplete <bgcolor=COLOR_FLAGS>;          // set to 1 when required server fields are present 0/1
+    ubyte  pendingIAP <bgcolor=COLOR_FLAGS>;                  // pending in-app purchase flag 0/1
+    ubyte  pushChallenges <bgcolor=COLOR_FLAGS>;              // gbPushChallenges 0/1
+    ubyte  reserved <bgcolor=COLOR_RESERVED>;
+};
+
+// Random suffix before owner id and checksum.
+struct SuffixData {
+    local int64 remainingSize = FileSize() - FTell();
+
+    if (remainingSize > 8) {
+        ubyte randomTail[remainingSize - 8];
+    }
+};
+
+// Footer, fixed 0x08 bytes.
+struct FooterData {
+    int32  ownerClientId;                   // -1 means no valid Glu Client ID. Always -1 now as server is shut down
+    uint32 checksum <format=hex>;           // CRC-32 checksum
+};
+
+if (FileSize() != EXPECTED_FILE_SIZE) { //old version currently not supported
+    Warning("Unexpected -1_1000 file size. This template only supports the current wrapper.");
+
+    Printf(
+        "WARNING: Unexpected -1_1000 file size: %Ld bytes; expected %d bytes.\n",
+        FileSize(),
+        EXPECTED_FILE_SIZE
+    );
+}
+
+HeaderData            header  <bgcolor=COLOR_HEADER>;
+PrefixData            prefix  <bgcolor=COLOR_WRAPPER>;
+PlayerProgressPayload payload <bgcolor=COLOR_PLAYER_STATE>;
+SuffixData            suffix  <bgcolor=COLOR_WRAPPER>;
+FooterData            footer  <bgcolor=COLOR_FOOTER>;
+
+if (sizeof(PlayerProgressPayload) != PLAYER_PROGRESS_SIZE) {
+    Warning("PlayerProgressPayload size is not 0x30 bytes.");
+}

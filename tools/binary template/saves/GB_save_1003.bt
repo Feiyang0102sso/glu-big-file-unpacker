@@ -1,0 +1,208 @@
+//------------------------------------------------
+//--- 010 Editor v15.0.2 Binary Template
+//
+//      File: GB_save_1003.bt
+//   Authors: Feiyang
+//   Version: 1.0
+//   Purpose: Gun Bros Save -1_1003 Based on iOS 3.6.0
+//            Planet waves saves
+//  Category: Game
+// File Mask: -1_1003
+//------------------------------------------------
+
+/*
+    Padding:
+        Random garbage is inserted before and after the payload to hide the
+        real data and pad the wrapped data to the next 512-byte boundary.
+
+    Checksum:
+        CRC-32/BZIP2 over fileBytes[0 .. FileSize() - 5].
+        poly=0x04C11DB7, init=0xFFFFFFFF, refin=false,
+        refout=false, xorout=0xFFFFFFFF. Stored as little-endian uint32.
+*/
+
+LittleEndian();
+
+// color palette
+const int COLOR_HEADER = 0xF7FFF8;
+const int COLOR_WRAPPER = 0x90959A;
+const int COLOR_PREFIX_SIZE = 0xFFB37C;
+const int COLOR_PAYLOAD = 0xFF729A;
+const int COLOR_PLANET_ID = 0xB0E0FF;
+const int COLOR_SYNC_STATE = 0xB0FFB0;
+const int COLOR_RESERVED = 0x66C9FF;
+const int COLOR_WAVE_UNLOCKED = 0xFFFFB0;
+const int COLOR_MAX_PERFECT_WAVE = 0xE0B0FF;
+const int COLOR_PERFECT_WAVE_BYTES = 0x3B2DFF;
+const int COLOR_FOOTER = 0X68FF9F;
+
+// Start offset of the first planet record. Read functions run after parsing,
+// so keep this offset for calculating each perfect-wave byte index.
+local int64 perfectWaveRecordsStart = 0;
+
+// header, fixed 0x08 bytes
+struct HeaderData {
+    int32  version;    // seems always 0
+    uint32 flag;       // seems always 0
+};
+
+// random prefix block
+// payload starts immediately after this structure
+struct PrefixData {
+    uint32 prefixSize <bgcolor=COLOR_PREFIX_SIZE>; // random prefix size
+    ubyte  randomPrefix[prefixSize];   // random prefix data
+};
+
+struct PlanetIDData {
+    ubyte bytes[6];
+};
+
+
+string planetIDFormat(PlanetIDData &id) {
+    if (id.bytes[0] == 0x82 &&
+        id.bytes[1] == 0x75 &&
+        id.bytes[2] == 0x26 &&
+        id.bytes[3] == 0x00 &&
+        id.bytes[4] == 0x06 &&
+        id.bytes[5] == 0x07)
+        return "Cerberus Prime";
+
+    if (id.bytes[0] == 0x87 &&
+        id.bytes[1] == 0x75 &&
+        id.bytes[2] == 0x26 &&
+        id.bytes[3] == 0x00 &&
+        id.bytes[4] == 0x03 &&
+        id.bytes[5] == 0x07)
+        return "Haven";
+
+    if (id.bytes[0] == 0x21 &&
+        id.bytes[1] == 0x58 &&
+        id.bytes[2] == 0x67 &&
+        id.bytes[3] == 0x01 &&
+        id.bytes[4] == 0x00 &&
+        id.bytes[5] == 0x07)
+        return "Bokor";
+
+    if (id.bytes[0] == 0x89 &&
+        id.bytes[1] == 0x75 &&
+        id.bytes[2] == 0x26 &&
+        id.bytes[3] == 0x00 &&
+        id.bytes[4] == 0x00 &&
+        id.bytes[5] == 0x07)
+        return "Ceres2";
+
+    if (id.bytes[0] == 0x22 &&
+        id.bytes[1] == 0x58 &&
+        id.bytes[2] == 0x67 &&
+        id.bytes[3] == 0x01 &&
+        id.bytes[4] == 0x00 &&
+        id.bytes[5] == 0x07)
+        return "Yeroc Sina";
+
+    string s;
+    SPrintf(
+        s,
+        "UNKNOWN_PLANET_ID %02X %02X %02X %02X %02X %02X",
+        id.bytes[0],
+        id.bytes[1],
+        id.bytes[2],
+        id.bytes[3],
+        id.bytes[4],
+        id.bytes[5]
+    );
+
+    return s;
+}
+
+
+typedef struct {
+    ubyte value <format=hex>;
+} PerfectWaveByte <read=perfectWaveByteFormat>;
+
+
+string perfectWaveByteFormat(PerfectWaveByte &perfectWaveByte) {
+    local int64 recordRelativeOffset = startof(perfectWaveByte) - perfectWaveRecordsStart;
+    local int byteIndex = (recordRelativeOffset % 0x20C) - 0x0C;
+    local int firstWave = byteIndex * 8 + 1;
+    local int lastWave = firstWave + 7;
+    local int bitIndex;
+    local int waveNumber;
+    local int hasPerfectWave = 0;
+    local string result;
+    local string waveText;
+
+    // The game uses zero-based bit indexes. Display wave numbers start at 1
+    // here for easier comparison with the in-game UI.
+    SPrintf(result, "Waves %d-%d | Perfect: ", firstWave, lastWave);
+
+    if (perfectWaveByte.value == 0) {
+        result += "none";
+        return result;
+    }
+
+    for (bitIndex = 0; bitIndex < 8; bitIndex++) {
+        if ((perfectWaveByte.value & (1 << bitIndex)) != 0) {
+            waveNumber = firstWave + bitIndex;
+
+            if (hasPerfectWave) {
+                result += ", ";
+            }
+
+            SPrintf(waveText, "%d", waveNumber);
+            result += waveText;
+            hasPerfectWave = 1;
+        }
+    }
+
+    return result;
+}
+
+// single planet wave record, fixed 0x20c bytes
+struct SinglePlanetWaveData {
+    PlanetIDData planetID <read=planetIDFormat, bgcolor=COLOR_PLANET_ID>;
+    uint8  syncState <bgcolor=COLOR_SYNC_STATE>;            // usually 1,  0=dirty, 1=pending, 2=synced
+    uint8  reserved <bgcolor=COLOR_RESERVED>;              // maybe fixed, maybe not
+
+    uint16 waveUnlocked <bgcolor=COLOR_WAVE_UNLOCKED>;        // wave unlocked value; source increments the zero-based wave index before saving
+    uint16 maxPerfectWave <bgcolor=COLOR_MAX_PERFECT_WAVE>;   // highest perfect wave index; zero-based, so display wave = value + 1
+
+    // One byte covers eight waves, from its least-significant bit to its most-significant bit.
+    // The source uses zero-based indexes; this template displays waves starting at 1 for readability.
+    PerfectWaveByte perfectWaveBytes[512] <bgcolor=COLOR_PERFECT_WAVE_BYTES>; // 4096-bit perfect-wave bitset
+};
+
+
+// planets wave payload after random prefix
+struct PlanetsWavePayload {
+    uint32 planetCount;                     // max 5 planet
+
+    if (planetCount > 5) {
+        Warning("planetCount > 5, please check payload offset or new data.");
+    }
+
+    perfectWaveRecordsStart = FTell();
+    SinglePlanetWaveData planets[planetCount] <optimize=false>;
+};
+
+
+// suffix data before owner id and checksum
+struct SuffixData {
+    local int64 remainingSize = FileSize() - FTell();
+
+    if (remainingSize > 8) {
+        ubyte randomTail[remainingSize - 8];
+    }
+};
+
+
+// footer fixed 0x08 bytes
+struct FooterData {
+    int32  ownerClientId;                   // -1 means no valid Glu Client ID. Always -1 now as server is shut down
+    uint32 checksum <format=hex>;           // CRC32 checksum
+};
+
+HeaderData          header       <bgcolor=COLOR_HEADER>;
+PrefixData          prefix       <bgcolor=COLOR_WRAPPER>;
+PlanetsWavePayload  payload      <bgcolor=COLOR_PAYLOAD>;
+SuffixData          suffix       <bgcolor=COLOR_WRAPPER>;
+FooterData          footer       <bgcolor=COLOR_FOOTER>;

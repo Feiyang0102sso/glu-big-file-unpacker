@@ -1,0 +1,330 @@
+//------------------------------------------------
+//--- 010 Editor v15.0.2 Binary Template
+//
+//      File: string_pack.bt
+//   Authors: Feiyang / Codex
+//   Version: 1.0
+//   Purpose: Read Gun Bros string_pack resources.
+//            The template supports 00 20, 00 A0 and 00 E0.
+//  Category: Game / Big Assets
+// File Mask: *.bin
+//------------------------------------------------
+
+LittleEndian();
+
+// ---------------------------------------------------------------------------
+// 1. Colors
+// ---------------------------------------------------------------------------
+
+const int COLOR_HEADER = 0xF7FFF8;
+const int COLOR_MAGIC = 0xFFD1DC;
+const int COLOR_STRING_COUNT = 0xD1FFD6;
+const int COLOR_FIRST_ID = 0xFF689F;
+const int COLOR_FIRST_OFFSET = 0xFFF0B3;
+const int COLOR_INDEX = 0xB0E0FF;
+const int COLOR_END_OFFSET = 0xFFFFB0;
+const int COLOR_TYPE = 0xE0B0FF;
+const int COLOR_STRING = 0xB0FFB0;
+const int COLOR_WARNING = 0xFFB37C;
+
+// The file bytes are 00 20, 00 A0 and 00 E0.
+// represent each string entry size
+const uint16 MAGIC_0020 = 0x2000;
+const uint16 MAGIC_00A0 = 0xA000;
+const uint16 MAGIC_00E0 = 0xE000;
+
+const uint32 STRING_ENTRY_PREFIX = 0x00000004;
+const uint32 STRING_TYPE_UTF8 = 0xF686AADC;
+
+
+// ---------------------------------------------------------------------------
+// 2. Small helper types
+// ---------------------------------------------------------------------------
+
+struct ExplicitIndexRecord {
+    uint16 stringId   <format=hex>;
+    uint16 dataOffset <format=hex>;
+};
+
+struct ExtendedOffsetRecord {
+    uint16 offsetHigh <format=hex>;
+    uint16 offsetLow  <format=hex>;
+};
+
+struct StringEntryPrefix {
+    uint32 value <format=hex>;
+};
+
+// 010 Editor does not allow a raw dynamic array to be declared repeatedly
+// inside a loop. Put the UTF-8 array inside this structure instead.
+local int64 currentTextByteCount = 0;
+
+struct StringDataRecord {
+    StringEntryPrefix entryPrefix <bgcolor=COLOR_STRING>;
+
+    if (currentTextByteCount > 0) {
+        char utf8Text[currentTextByteCount] <bgcolor=COLOR_STRING>;
+    }
+};
+
+
+string magicDescription(uint16 &value) {
+    if (value == MAGIC_0020) {
+        return "00 20 - explicit ID + 16-bit offset";
+    }
+
+    if (value == MAGIC_00A0) {
+        return "00 A0 - sequential ID + 16-bit offset";
+    }
+
+    if (value == MAGIC_00E0) {
+        return "00 E0 - sequential ID + extended 32-bit offset";
+    }
+
+    return "Unknown string_pack format";
+}
+
+
+string stringTypeDescription(uint32 &value) {
+    if (value == STRING_TYPE_UTF8) {
+        return "0xF686AADC - UTF-8 string resource";
+    }
+
+    return "Unknown resource type";
+}
+
+
+typedef uint32 StringTypeValue <
+    format=hex,
+    read=stringTypeDescription
+>;
+
+
+// ---------------------------------------------------------------------------
+// 3. Common header
+// ---------------------------------------------------------------------------
+
+struct StringPackHeader {
+    uint16 magic          <format=hex, read=magicDescription, bgcolor=COLOR_MAGIC>;
+    uint16 stringCount    <bgcolor=COLOR_STRING_COUNT>;
+    uint16 firstStringId  <format=hex, bgcolor=COLOR_FIRST_ID>;
+    uint16 firstOffset    <format=hex, bgcolor=COLOR_FIRST_OFFSET>;
+};
+
+StringPackHeader header;
+
+if (header.stringCount == 0) {
+    Warning("stringCount is zero. Check that this is really a string_pack.");
+}
+
+if (header.magic != MAGIC_0020 &&
+    header.magic != MAGIC_00A0 &&
+    header.magic != MAGIC_00E0) {
+    Warning("Unknown string_pack Magic. The template stops after the common header.");
+}
+
+
+// These local arrays hold normalized values for the final string-reading step.
+//
+// stringOffsets[0]                 = firstOffset from the header
+// stringOffsets[stringCount]       = end of the last string
+// stringIds[i]                     = resource ID of string i
+//
+// They are local on purpose: they help the template jump to each string, but
+// they do not create fake bytes in the parsed file tree.
+local uint32 stringOffsets[header.stringCount + 1];
+local uint32 stringIds[header.stringCount];
+
+if (header.stringCount > 0) {
+    stringOffsets[0] = header.firstOffset;
+    stringIds[0] = header.firstStringId;
+}
+
+
+// ---------------------------------------------------------------------------
+// 4. Format 00 20
+// ---------------------------------------------------------------------------
+//
+// Layout after the common header:
+//
+//     For strings 1 .. N-1:
+//         uint16 stringId
+//         uint16 dataOffset
+//
+//     uint16 endOffset
+//     uint16 reserved
+//     uint32 type[N]
+//     string data
+//
+// The first string ID and first offset are already in the common header.
+// Unlike 00 A0 and 00 E0, every later record stores its own string ID.
+
+if (header.magic == MAGIC_0020) {
+    if (header.stringCount > 1) {
+        ExplicitIndexRecord explicitIndex[header.stringCount - 1] <bgcolor=COLOR_INDEX>;
+
+        local int explicitIndexNumber;
+        for (explicitIndexNumber = 0;
+             explicitIndexNumber < header.stringCount - 1;
+             explicitIndexNumber++) {
+            stringOffsets[explicitIndexNumber + 1] =
+                explicitIndex[explicitIndexNumber].dataOffset;
+            stringIds[explicitIndexNumber + 1] =
+                explicitIndex[explicitIndexNumber].stringId;
+        }
+    }
+
+    uint16 explicitEndOffset <format=hex, bgcolor=COLOR_END_OFFSET>;
+    uint16 explicitReserved <format=hex, bgcolor=COLOR_END_OFFSET>;
+    stringOffsets[header.stringCount] = explicitEndOffset;
+
+    StringTypeValue stringTypes_0020[header.stringCount]
+        <bgcolor=COLOR_TYPE, optimize=false>;
+}
+
+
+// ---------------------------------------------------------------------------
+// 5. Format 00 A0
+// ---------------------------------------------------------------------------
+//
+// Layout after the common header:
+//
+//     For strings 1 .. N-1:
+//         uint16 dataOffset
+//
+//     uint16 endOffset
+//     uint16 reserved
+//     uint32 type[N]
+//     string data
+//
+// IDs are not repeated in the index. They are sequential:
+//     firstStringId, firstStringId + 1, firstStringId + 2, ...
+
+if (header.magic == MAGIC_00A0) {
+    if (header.stringCount > 1) {
+        uint16 additionalOffsets[header.stringCount - 1] <format=hex, bgcolor=COLOR_INDEX>;
+
+        local int offsetNumber;
+        for (offsetNumber = 0;
+             offsetNumber < header.stringCount - 1;
+             offsetNumber++) {
+            stringOffsets[offsetNumber + 1] = additionalOffsets[offsetNumber];
+            stringIds[offsetNumber + 1] =
+                header.firstStringId + offsetNumber + 1;
+        }
+    }
+
+    uint16 sequentialEndOffset <format=hex, bgcolor=COLOR_END_OFFSET>;
+    uint16 sequentialReserved <format=hex, bgcolor=COLOR_END_OFFSET>;
+    stringOffsets[header.stringCount] = sequentialEndOffset;
+
+    StringTypeValue stringTypes_00A0[header.stringCount]
+        <bgcolor=COLOR_TYPE, optimize=false>;
+}
+
+
+// ---------------------------------------------------------------------------
+// 6. Format 00 E0
+// ---------------------------------------------------------------------------
+//
+// 00 E0 is not a new text encoding. It is the extended-offset form.
+//
+// Layout after the common header:
+//
+//     For strings 1 .. N-1:
+//         uint16 offsetHigh
+//         uint16 offsetLow
+//
+//     uint16 endOffsetHigh
+//     uint16 endOffsetLow
+//     uint16 reserved
+//     uint32 type[N]
+//     string data
+//
+// The real offset is:
+//     offsetHigh << 16 | offsetLow
+//
+if (header.magic == MAGIC_00E0) {
+    local uint32 combinedOffset;
+
+    if (header.stringCount > 1) {
+        ExtendedOffsetRecord extendedOffsets[header.stringCount - 1] <bgcolor=COLOR_INDEX>;
+
+        local int extendedOffsetNumber;
+        for (extendedOffsetNumber = 0;
+             extendedOffsetNumber < header.stringCount - 1;
+             extendedOffsetNumber++) {
+            // Do the calculation in uint32. This is important when the
+            // high word is 1 or larger.
+            combinedOffset = extendedOffsets[extendedOffsetNumber].offsetHigh;
+            combinedOffset = combinedOffset << 16;
+            combinedOffset = combinedOffset |
+                extendedOffsets[extendedOffsetNumber].offsetLow;
+
+            stringOffsets[extendedOffsetNumber + 1] = combinedOffset;
+
+            stringIds[extendedOffsetNumber + 1] =
+                header.firstStringId + extendedOffsetNumber + 1;
+        }
+    }
+
+    uint16 extendedEndOffsetHigh <format=hex, bgcolor=COLOR_END_OFFSET>;
+    uint16 extendedEndOffsetLow  <format=hex, bgcolor=COLOR_END_OFFSET>;
+    uint16 extendedReserved      <format=hex, bgcolor=COLOR_END_OFFSET>;
+
+    combinedOffset = extendedEndOffsetHigh;
+    combinedOffset = combinedOffset << 16;
+    combinedOffset = combinedOffset | extendedEndOffsetLow;
+    stringOffsets[header.stringCount] = combinedOffset;
+
+    StringTypeValue stringTypes_00E0[header.stringCount]
+        <bgcolor=COLOR_TYPE, optimize=false>;
+}
+
+
+// ---------------------------------------------------------------------------
+// 7. Common string data
+// ---------------------------------------------------------------------------
+//
+// This part is shared by all three formats. The index format changes, but
+// the actual string records look the same in the samples.
+
+if (header.magic == MAGIC_0020 ||
+    header.magic == MAGIC_00A0 ||
+    header.magic == MAGIC_00E0) {
+    local int i;
+    local int64 currentOffset;
+    local int64 nextOffset;
+    local int64 entrySize;
+    local int64 textByteCount;
+
+    for (i = 0; i < header.stringCount; i++) {
+        currentOffset = stringOffsets[i];
+        nextOffset = stringOffsets[i + 1];
+        entrySize = nextOffset - currentOffset;
+
+        // The first four bytes are the per-string prefix 04 00 00 00.
+        // The remaining bytes are UTF-8 text, normally ending in 00.
+        if (entrySize < 4) {
+            Warning("A string entry is shorter than its four-byte prefix.");
+        }
+        else {
+            FSeek(currentOffset);
+
+            textByteCount = entrySize - 4;
+            currentTextByteCount = textByteCount;
+            StringDataRecord stringData <bgcolor=COLOR_STRING>;
+
+            if (stringData.entryPrefix.value != STRING_ENTRY_PREFIX) {
+                Warning("This string entry does not start with 04 00 00 00.");
+            }
+
+            if (textByteCount > 0) {
+                // The UTF-8 bytes are inside stringData.utf8Text.
+            }
+            else {
+                Warning("A string entry has no text bytes.");
+            }
+        }
+    }
+}
