@@ -1,8 +1,11 @@
 """Resource type detection."""
 
 
+# String packs get their strings exported to CSV during unpacking.
+STRING_PACK_HASH = 0x69E4C505
+
 TYPE_MAP = {
-    0x69E4C505: "string_pack",
+    STRING_PACK_HASH: "string_pack",
     0x69E5D35C: "metadata",
     0xB7178678: "png",
     0xF4E02223: "bin",

@@ -1,0 +1,119 @@
+//------------------------------------------------
+//--- 010 Editor v15.0.2 Binary Template
+//
+//      File: big_TOC.bt
+//   Authors: Feiyang / Codex
+//   Version: 1.0
+//   Purpose: Read the internal metadata handle table identified by
+//            group hash 0x69E5D35C.
+//  Category: Game / Big Assets
+// File Mask: *.bin
+//------------------------------------------------
+
+/*
+    This is not the outer BIG file TOC.
+
+    The 0x69E5D35C resource format found in the samples is:
+
+        uint16 entryCount;
+        uint32 resourceHandle[entryCount];
+
+    The entries are logical resource handles, not physical file offsets.
+    For example, pack1_xga contains:
+
+        0315: count 498, file size 2 + 498 * 4 = 1994
+        0316: count 465, file size 2 + 465 * 4 = 1862
+
+    The exact semantic split between locale handles, aggregate handles,
+    and other initialization handles is resolved by the game runtime.
+*/
+
+LittleEndian();
+
+
+// ------------------------------------------------
+// Colors
+// ------------------------------------------------
+
+const int COLOR_ENTRY_COUNT = 0xD1FFD6;
+const int COLOR_ORDINARY_LOW = 0xB8E0D2;
+const int COLOR_ORDINARY_HIGH = 0x7FB3D5;
+const int COLOR_AGGREGATE_LOW = 0xF5CBA7;
+const int COLOR_AGGREGATE_HIGH = 0xE59866;
+
+const uint32 AGGREGATE_HANDLE_FLAG = 0x20000000;
+
+
+// ------------------------------------------------
+// Header
+// ------------------------------------------------
+
+struct BigTocHeader {
+    // Number of uint32 resource handles following this field.
+    uint16 entryCount <format=decimal, bgcolor=COLOR_ENTRY_COUNT>;
+};
+
+
+// ------------------------------------------------
+// Resource handle
+// ------------------------------------------------
+
+// Ordinary handle: for example 0x03000100 is stored as 00 01 00 03.
+struct OrdinaryBigTocEntry {
+    //
+    // Low 16 bits: resource ID portion used by the direct lookup path.
+    //
+    uint16 lowWord <format=hex, bgcolor=COLOR_ORDINARY_LOW>;
+
+    // High 16 bits: namespace/flags portion of the ordinary handle.
+    uint16 highWord <format=hex, bgcolor=COLOR_ORDINARY_HIGH>;
+};
+
+
+// Aggregate handle: for example 0x21FF0156 is stored as 56 01 FF 21.
+struct AggregateBigTocEntry {
+    // Low 16 bits. The runtime masks this value with 0x7FFF when locating
+    // the aggregate sub-resource.
+    uint16 lowWord <format=hex, bgcolor=COLOR_AGGREGATE_LOW>;
+
+    // High 16 bits. Bit 29 of the complete uint32 is the aggregate flag;
+    // BYTE2 is the aggregate-table selector.
+    uint16 highWord <format=hex, bgcolor=COLOR_AGGREGATE_HIGH>;
+};
+
+
+// ------------------------------------------------
+// Main
+// ------------------------------------------------
+
+BigTocHeader header;
+
+struct BigTocEntries {
+    local uint32 rawHandle;
+
+    for (local uint entryIndex = 0; entryIndex < header.entryCount; entryIndex++) {
+        // ReadUInt is a non-consuming peek. The actual fields are parsed by
+        // the selected structure below, so the two 16-bit words remain
+        // separately visible in the Template Results panel.
+        rawHandle = ReadUInt(FTell());
+
+        if ((rawHandle & AGGREGATE_HANDLE_FLAG) != 0) {
+            AggregateBigTocEntry aggregateEntry <optimize=false>;
+        }
+        else {
+            OrdinaryBigTocEntry ordinaryEntry <optimize=false>;
+        }
+    }
+};
+
+BigTocEntries entries;
+
+
+// The format has no trailing bytes in the supplied samples.
+// Keep this check enabled so malformed or differently-versioned files are
+// immediately visible in 010 Editor.
+local uint64 expectedFileSize = 2 + (uint64)header.entryCount * 4;
+if (FileSize() != expectedFileSize) {
+    Warning("0x69E5D35C size mismatch: expected " +
+            expectedFileSize + " bytes, got " + FileSize() + " bytes.");
+}

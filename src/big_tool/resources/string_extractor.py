@@ -1,4 +1,4 @@
-"""String resource extractor."""
+"""String pack (group hash 0x69E4C505) parser and CSV exporter."""
 
 import csv
 import struct
@@ -6,6 +6,45 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from big_tool.logger import logger
+
+
+# ------------------------------------------------------------------
+# Header
+# ------------------------------------------------------------------
+
+# Layout: magic(2) + entryCount(2) + entryId(2) + first entry offset(2 or 4)
+MAGIC_POSITION = 0
+ENTRY_COUNT_POSITION = 2
+FIRST_OFFSET_POSITION = 6
+MIN_HEADER_SIZE = 10
+
+# Magic bit flags.
+# 0x8000 set   -> byte 4..6 is the id of the whole pack, entries only store offsets.
+# 0x8000 clear -> every entry stores its own uint16 id followed by its offset.
+# Either way byte 4..6 is a uint16 id, which is why byte 6 always starts an offset.
+FLAG_SEQUENTIAL_ID = 0x8000
+FLAG_32BIT_OFFSET = 0x4000
+KNOWN_MAGICS = {0x2000, 0xA000, 0xE000}
+
+# ------------------------------------------------------------------
+# Resource type table
+# ------------------------------------------------------------------
+
+# One uint32 per entry, stored right before the string data.
+TYPE_ENTRY_SIZE = 4
+RESOURCE_TYPE_UTF8 = 0xF686AADC
+
+# ------------------------------------------------------------------
+# String block
+# ------------------------------------------------------------------
+
+# uint32 prefix (always 4 in every known sample) + UTF-8 text + 0x00.
+BLOCK_PREFIX_SIZE = 4
+BLOCK_TERMINATOR = b"\x00"
+STRING_ENCODING = "utf-8"
+
+CSV_HEADERS = ["id", "offset", "length", "String"]
+CSV_SUFFIX = "_Strings.csv"
 
 
 @dataclass(frozen=True)
@@ -20,50 +59,42 @@ class StringResource:
 
 class ResourceStringExtractor:
     """
-    File layout:
-    [Header(8B)] [Offsets(N*2B)] [Offset End(2B)] [Types(N*4B)] [Data]
-    """
+    Read every string out of a string pack.
 
-    MAGIC_ID = b"\x00\xa0"
-    HEADER_SIZE = 8
-    OFFSET_ENTRY_SIZE = 2
-    OFFSET_END_PADDING_SIZE = 2
-    TYPE_ENTRY_SIZE = 4
-    STRING_BLOCK_PREFIX_SIZE = 4
-    STRING_ENCODING = "utf-8"
+    File layout:
+        [header] [offset table] [type table] [string blocks]
+
+    The offset table is redundant: string blocks are stored back to back, so
+    parsing jumps straight to the first entry offset and walks forward until
+    the end of the file. Verified against every known sample - the derived
+    offsets match the declared table exactly.
+    """
 
     def __init__(self, filepath: Path):
         self.filepath = Path(filepath).resolve()
-        self.resource_count = 0
-        self.offset_table: list[int] = []
-        self.extracted_strings: list[StringResource] = []
-        self.data_start_offset = 0
+        self.magic = 0
+        self.entry_count = 0
+        self.data_start = 0
+        self.strings: list[StringResource] = []
 
     def extract(self) -> list[StringResource]:
-        """Extract all string resources."""
+        """Parse the file and return all string resources."""
         data = self.filepath.read_bytes()
         self._read_header(data)
-        self._read_offset_table(data)
-        self._calculate_pointers()
-        self._extract_strings(data)
-        return self.extracted_strings
+        self._read_strings(data)
+        self._check_resource_types(data)
+        return self.strings
 
-    def write_csv(self, output_filepath: Path | None = None) -> Path:
-        """Extract strings and write a CSV file."""
-        if not self.extracted_strings:
+    def write_csv(self) -> Path:
+        """Write the strings to a CSV file next to the string pack."""
+        if not self.strings:
             self.extract()
 
-        if output_filepath is None:
-            output_filepath = self.filepath.with_name(
-                f"{self.filepath.stem}_Strings.csv"
-            )
-
-        output_filepath = Path(output_filepath).resolve()
-        output_filepath.parent.mkdir(parents=True, exist_ok=True)
+        output_filepath = self.filepath.with_name(f"{self.filepath.stem}{CSV_SUFFIX}")
         with output_filepath.open("w", newline="", encoding="utf-8") as file:
-            writer = csv.DictWriter(file, fieldnames=["id", "offset", "length", "String"])
+            writer = csv.DictWriter(file, fieldnames=CSV_HEADERS)
             writer.writeheader()
-            for resource in self.extracted_strings:
+            for resource in self.strings:
                 writer.writerow(
                     {
                         "id": resource.resource_id,
@@ -73,99 +104,74 @@ class ResourceStringExtractor:
                     }
                 )
 
-        logger.info(f"Writing {len(self.extracted_strings)} strings to {output_filepath}")
+        logger.info(f"Wrote {len(self.strings)} strings to {output_filepath}")
         return output_filepath
 
     def _read_header(self, data: bytes) -> None:
-        if len(data) < self.HEADER_SIZE:
-            raise ValueError("File size is too small for a string resource header")
+        """Read the magic, the entry count and where the string data starts."""
+        if len(data) < MIN_HEADER_SIZE:
+            raise ValueError("File is too small to be a string pack")
 
-        header = data[: self.HEADER_SIZE]
-        if header[:2] != self.MAGIC_ID:
-            raise ValueError(
-                f"Invalid file signature: expected {self.MAGIC_ID.hex()}, got {header[:2].hex()}"
-            )
-
-        self.resource_count = struct.unpack("<H", header[2:4])[0]
-        if self.resource_count <= 0:
-            raise ValueError(f"Invalid resource count: {self.resource_count}")
-
-        first_offset = struct.unpack("<H", header[6:8])[0]
-        self.offset_table = [first_offset]
-
-    def _read_offset_table(self, data: bytes) -> None:
-        table_start = self.HEADER_SIZE
-        table_size = self.resource_count * self.OFFSET_ENTRY_SIZE
-        table_end = table_start + table_size
-        if table_end + self.OFFSET_END_PADDING_SIZE > len(data):
-            raise ValueError("Offset table data truncated")
-
-        for position in range(table_start, table_end, self.OFFSET_ENTRY_SIZE):
-            offset = struct.unpack("<H", data[position:position + 2])[0]
-            self.offset_table.append(offset)
-
-        padding_start = table_end
-        padding = data[padding_start:padding_start + self.OFFSET_END_PADDING_SIZE]
-        if padding != b"\x00\x00":
+        self.magic = struct.unpack_from("<H", data, MAGIC_POSITION)[0]
+        if self.magic not in KNOWN_MAGICS:
             logger.warning(
-                f"Offset table padding mismatch: expected 0000, got {padding.hex()}"
+                f"{self.filepath.name}: unknown string pack magic {hex(self.magic)}, "
+                f"parsing it as a {'32' if self.magic & FLAG_32BIT_OFFSET else '16'}-bit offset table"
             )
 
-    def _calculate_pointers(self) -> None:
-        table_size = self.resource_count * self.OFFSET_ENTRY_SIZE
-        type_table_start = self.HEADER_SIZE + table_size + self.OFFSET_END_PADDING_SIZE
-        self.data_start_offset = type_table_start + self.resource_count * self.TYPE_ENTRY_SIZE
+        self.entry_count = struct.unpack_from("<H", data, ENTRY_COUNT_POSITION)[0]
 
-    def _extract_strings(self, data: bytes) -> None:
-        current_offset = self.data_start_offset
-        self.extracted_strings = []
+        # The first entry offset is where the string data begins.
+        if self.magic & FLAG_32BIT_OFFSET:
+            self.data_start = struct.unpack_from("<I", data, FIRST_OFFSET_POSITION)[0]
+        else:
+            self.data_start = struct.unpack_from("<H", data, FIRST_OFFSET_POSITION)[0]
 
-        for resource_id in range(self.resource_count):
-            next_offset = self.offset_table[resource_id + 1]
-            declared_length = next_offset - current_offset
-            if declared_length < 0:
-                raise ValueError(f"Invalid string offset at resource {resource_id}")
+        if self.data_start > len(data):
+            raise ValueError(
+                f"First entry offset {hex(self.data_start)} is outside the file"
+            )
 
-            block = data[current_offset:next_offset]
-            if len(block) != declared_length:
-                logger.warning(f"String resource {resource_id} is truncated")
+    def _check_resource_types(self, data: bytes) -> None:
+        """Warn once if the pack does not hold UTF-8 string resources."""
+        table_start = self.data_start - self.entry_count * TYPE_ENTRY_SIZE
+        if table_start < FIRST_OFFSET_POSITION:
+            logger.warning(
+                f"{self.filepath.name}: no room for a resource type table before {hex(self.data_start)}"
+            )
+            return
 
-            string_body = block[self.STRING_BLOCK_PREFIX_SIZE:]
-            if string_body.endswith(b"\x00"):
-                string_body = string_body[:-1]
-            elif string_body:
-                logger.warning(f"String resource {resource_id} has no null terminator")
-
-            text = string_body.decode(self.STRING_ENCODING, errors="replace")
-            self.extracted_strings.append(
-                StringResource(
-                    resource_id,
-                    current_offset,
-                    len(string_body),
-                    text.replace("\n", "\\n"),
+        for index in range(self.entry_count):
+            resource_type = struct.unpack_from("<I", data, table_start + index * TYPE_ENTRY_SIZE)[0]
+            if resource_type != RESOURCE_TYPE_UTF8:
+                logger.warning(
+                    f"{self.filepath.name}: entry {index} has resource type {hex(resource_type)}, "
+                    f"not UTF-8 ({hex(RESOURCE_TYPE_UTF8)})"
                 )
+                return
+
+    def _read_strings(self, data: bytes) -> None:
+        """Walk the string blocks from the first entry offset to the end of the file."""
+        self.strings = []
+        position = self.data_start
+
+        # A block needs a prefix plus at least the terminator byte.
+        while position + BLOCK_PREFIX_SIZE < len(data):
+            text_start = position + BLOCK_PREFIX_SIZE
+            terminator_position = data.find(BLOCK_TERMINATOR, text_start)
+            if terminator_position < 0:
+                raise ValueError(f"String block at {hex(position)} has no terminator")
+
+            body = data[text_start:terminator_position]
+            # Escape newlines so a multi line string stays on one CSV row.
+            text = body.decode(STRING_ENCODING, errors="replace").replace("\n", "\\n")
+            self.strings.append(
+                StringResource(len(self.strings), position, len(body), text)
             )
-            current_offset = next_offset
+            position = terminator_position + 1
 
-
-def extract_strings_from_directory(root_dir: Path) -> list[Path]:
-    """Extract parseable string BIN files recursively."""
-    root_dir = Path(root_dir).resolve()
-    if not root_dir.is_dir():
-        raise NotADirectoryError(root_dir)
-
-    output_files: list[Path] = []
-    files = list(root_dir.rglob("*.bin"))
-    files.sort()
-    for filepath in files:
-        if filepath.stat().st_size < ResourceStringExtractor.HEADER_SIZE:
-            logger.warning(f"Skipping small file: {filepath.name}")
-            continue
-
-        try:
-            extractor = ResourceStringExtractor(filepath)
-            output_files.append(extractor.write_csv())
-        except ValueError as error:
-            logger.warning(f"Skipping {filepath.name}: {error}")
-
-    return output_files
+        if len(self.strings) != self.entry_count:
+            raise ValueError(
+                f"Entry count mismatch: header declares {self.entry_count}, "
+                f"parsed {len(self.strings)}"
+            )

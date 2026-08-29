@@ -8,7 +8,6 @@ from big_tool.big_archive.big_extractor import unpack_directory
 from big_tool.config import get_output_dir, init_app_env
 from big_tool.logger import logger
 from big_tool.models.converter import convert_directory
-from big_tool.resources.string_extractor import ResourceStringExtractor, extract_strings_from_directory
 from big_tool.version import __version__
 
 
@@ -18,16 +17,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    unpack_parser = subparsers.add_parser("unpack", help="Extract all .big files in a directory")
+    unpack_parser = subparsers.add_parser(
+        "unpack", help="Extract all .big files in a directory (string packs are exported to CSV)"
+    )
     unpack_parser.add_argument("input", type=Path)
     unpack_parser.add_argument("--output", type=Path)
     unpack_parser.add_argument("--no-recursive", action="store_true")
     unpack_parser.add_argument("--no-clean", action="store_true")
     unpack_parser.add_argument("--yes", action="store_true", help="Skip cleanup confirmation")
-
-    strings_parser = subparsers.add_parser("strings", help="Extract string resources")
-    strings_parser.add_argument("input", type=Path)
-    strings_parser.add_argument("--output", type=Path)
 
     search_parser = subparsers.add_parser("search", help="Search binary content")
     search_parser.add_argument("input", type=Path)
@@ -76,14 +73,6 @@ def main(argv: list[str] | None = None) -> int:
         for result in results:
             failed_count += result.failed_count
         return 1 if failed_count else 0
-
-    if args.command == "strings":
-        if args.input.is_dir():
-            extract_strings_from_directory(args.input)
-        else:
-            extractor = ResourceStringExtractor(args.input)
-            extractor.write_csv(args.output)
-        return 0
 
     if args.command == "search":
         options = SearchOptions(

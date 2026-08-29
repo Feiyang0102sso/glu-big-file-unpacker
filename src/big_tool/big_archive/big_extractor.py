@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Callable
 
 from big_tool.big_archive.big_format import ArchiveEntry, BigArchive
-from big_tool.big_archive.file_types import TYPE_MAP, guess_extension
+from big_tool.big_archive.file_types import STRING_PACK_HASH, TYPE_MAP, guess_extension
 from big_tool.logger import logger
+from big_tool.resources.string_extractor import ResourceStringExtractor
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,9 @@ class ArchiveExtractor:
         output_path = group_dir / filename
         output_path.write_bytes(final_data)
 
+        if resource_hash == STRING_PACK_HASH:
+            self._export_string_csv(output_path)
+
         self.csv_data.append(
             {
                 "id": entry.index,
@@ -127,6 +131,15 @@ class ArchiveExtractor:
         )
         self.stats[extension]["count"] += 1
         self.stats[extension]["size"] += len(final_data)
+
+    def _export_string_csv(self, string_pack_path: Path) -> None:
+        """Write a strings CSV next to an extracted string pack."""
+        # A malformed string pack must not fail the resource itself:
+        # the .bin is already on disk and still usable.
+        try:
+            ResourceStringExtractor(string_pack_path).write_csv()
+        except ValueError as error:
+            logger.warning(f"No strings exported for {string_pack_path.name}: {error}")
 
     def _append_error_row(self, entry: ArchiveEntry, message: str) -> None:
         self.csv_data.append(
