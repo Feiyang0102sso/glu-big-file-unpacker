@@ -82,7 +82,7 @@ struct BigFileHeader {
 // ------------------------------------------------
 
 /*
-sum(blan IDs in table1) == 254 + all strings nums
+sum(blank IDs in table1) == 254 + all strings nums
 
 table1[0] always 1 entry (pointer to string pack)
 
