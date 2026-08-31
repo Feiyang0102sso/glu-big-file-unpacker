@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Callable
 
 from big_tool.big_archive.big_format import ArchiveEntry, BigArchive
-from big_tool.big_archive.file_types import STRING_PACK_HASH, TYPE_MAP, guess_extension
+from big_tool.big_archive.file_types import (
+    REF_EXTENSION,
+    STRING_PACK_HASH,
+    TYPE_MAP,
+    guess_extension,
+)
 from big_tool.logger import logger
 from big_tool.resources.string_extractor import ResourceStringExtractor
 
@@ -40,6 +45,7 @@ class ArchiveExtractor:
         self.output_dir = Path(output_dir).resolve()
         self.stats: defaultdict[str, dict[str, int]] = defaultdict(_new_stats)
         self.csv_data: list[dict[str, object]] = []
+        self.empty_resource_count = 0
 
     def extract_all(self) -> ExtractionResult:
         """Extract all resources and write a CSV manifest."""
@@ -56,6 +62,10 @@ class ArchiveExtractor:
                 self._append_error_row(entry, str(error))
 
         self._write_manifest()
+        logger.debug(
+            f"{self.archive.filepath.name}: "
+            f"{self.empty_resource_count} empty ref placeholders"
+        )
         extracted_count = len(self.csv_data) - failed_count
         logger.info(
             f"Extracted {extracted_count} resources from {self.archive.filepath.name}"
@@ -81,29 +91,29 @@ class ArchiveExtractor:
             if len(block) < 12:
                 raise ValueError("compressed resource header is truncated")
             original_size, compressed_size = struct.unpack("<II", block[4:12])
-            if original_size == 0:
-                final_data = block[4:12]
-                extension = ".bin"
-                resource_type = "ref"
-            else:
-                compressed_data = block[12:12 + compressed_size]
-                final_data = zlib.decompress(compressed_data)
-                if len(final_data) != original_size:
-                    logger.warning(
-                        f"Resource {entry.index} size mismatch: "
-                        f"declared {original_size}, actual {len(final_data)}"
-                    )
-                extension = guess_extension(final_data, resource_hash)
-                resource_type = extension.lstrip(".")
+            compressed_data = block[12:12 + compressed_size]
+            final_data = zlib.decompress(compressed_data)
+            if len(final_data) != original_size:
+                logger.warning(
+                    f"Resource {entry.index} size mismatch: "
+                    f"declared {original_size}, actual {len(final_data)}"
+                )
         else:
             final_data = block[4:]
             original_size = len(final_data)
-            extension = guess_extension(final_data, resource_hash)
-            resource_type = extension.lstrip(".")
+
+        extension = guess_extension(final_data, resource_hash)
+        resource_type = extension.lstrip(".")
 
         mapped_type = TYPE_MAP.get(resource_hash)
         if mapped_type is not None:
             resource_type = mapped_type
+
+        # An empty resource keeps its own type: the group type would bury it
+        # among the real resources of that group in the CSV.
+        if extension == REF_EXTENSION:
+            self.empty_resource_count += 1
+            resource_type = REF_EXTENSION.lstrip(".")
 
         group_dir = self.output_dir / hex(resource_hash)
         group_dir.mkdir(parents=True, exist_ok=True)
