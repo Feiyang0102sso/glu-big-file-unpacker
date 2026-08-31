@@ -13,6 +13,15 @@ class BigArchiveError(ValueError):
 
 
 @dataclass(frozen=True)
+class LogicalIdRange:
+    """One table1 entry: a run of logical IDs mapped to a run of table2 indices."""
+
+    base_resource_id: int
+    length: int
+    table2_start_index: int
+
+
+@dataclass(frozen=True)
 class ArchiveEntry:
     """One resource entry in the BIG table of contents."""
 
@@ -29,6 +38,8 @@ class BigArchive:
     HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
     ENTRY_FORMAT = "<II"
     ENTRY_SIZE = struct.calcsize(ENTRY_FORMAT)
+    RANGE_FORMAT = "<IHH"
+    RANGE_SIZE = struct.calcsize(RANGE_FORMAT)
     FOOTER_SIZE = 8
 
     def __init__(self, filepath: Path):
@@ -36,6 +47,7 @@ class BigArchive:
         self.file_handle: BinaryIO | None = None
         self.metadata: dict[str, int | bytes] = {}
         self.entries: list[ArchiveEntry] = []
+        self.id_ranges: list[LogicalIdRange] = []
         self._is_parsed = False
 
     @property
@@ -65,6 +77,7 @@ class BigArchive:
 
         logger.info(f"Parsing archive structure: {self.filepath.name}...")
         self._load_header_and_footer()
+        self._load_id_ranges()
         self._load_main_toc()
         self._is_parsed = True
         return self
@@ -112,6 +125,44 @@ class BigArchive:
             "data_size": data_size,
             "total_file_size": declared_file_size,
         }
+
+    def _load_id_ranges(self) -> None:
+        """Read table1, the sparse logical ID to table2 index mapping."""
+        table1_offset = int(self.metadata["table1_offset"])
+        table1_count = int(self.metadata["table1_count"])
+        file_size = self.filepath.stat().st_size
+        table1_end = table1_offset + table1_count * self.RANGE_SIZE
+        if table1_offset < self.HEADER_SIZE or table1_end > file_size:
+            raise BigArchiveError("BIG table1 is outside the file")
+
+        self.file_handle.seek(table1_offset)
+        self.id_ranges = []
+        for _ in range(table1_count):
+            range_data = self.file_handle.read(self.RANGE_SIZE)
+            if len(range_data) != self.RANGE_SIZE:
+                raise BigArchiveError("BIG table1 is truncated")
+            base_id, length, start_index = struct.unpack(self.RANGE_FORMAT, range_data)
+            self.id_ranges.append(LogicalIdRange(base_id, length, start_index))
+
+    def logical_id_of(self, table2_index: int) -> int | None:
+        """Return the logical resource ID of a table2 entry, or None if unmapped."""
+        for id_range in self.id_ranges:
+            distance = table2_index - id_range.table2_start_index
+            if 0 <= distance < id_range.length:
+                return id_range.base_resource_id + distance
+        return None
+
+    def table2_index_of(self, logical_id: int) -> int | None:
+        """Return the table2 index of a logical resource ID, or None if unmapped.
+
+        Logical IDs that fall in a table1 hole belong to string pack entries and
+        are resolved by the string pack itself, not by this table.
+        """
+        for id_range in self.id_ranges:
+            distance = logical_id - id_range.base_resource_id
+            if 0 <= distance < id_range.length:
+                return id_range.table2_start_index + distance
+        return None
 
     def _load_main_toc(self) -> None:
         toc_offset = int(self.metadata["toc_offset"])

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from big_tool.big_archive.big_format import ArchiveEntry, BigArchive
+from big_tool.big_archive.big_section import label_output_directory
 from big_tool.big_archive.file_types import (
     REF_EXTENSION,
     STRING_PACK_HASH,
@@ -117,6 +118,9 @@ class ArchiveExtractor:
 
         group_dir = self.output_dir / hex(resource_hash)
         group_dir.mkdir(parents=True, exist_ok=True)
+        # The index in this name is the resource's table2 index, and
+        # big_section.RESOURCE_INDEX_PATTERN reads it back to rebuild the
+        # Section table. Changing the name breaks that, so keep them in sync.
         filename = (
             f"{self.archive.filepath.stem}_{entry.index:04d}_"
             f"{hex(entry.offset)}{extension}"
@@ -129,7 +133,8 @@ class ArchiveExtractor:
 
         self.csv_data.append(
             {
-                "id": entry.index,
+                "physical_id": entry.index,
+                "logical_id": self._logical_id_text(entry),
                 "section": "",
                 "sub_group": hex(resource_hash),
                 "type": resource_type,
@@ -151,10 +156,18 @@ class ArchiveExtractor:
         except ValueError as error:
             logger.warning(f"No strings exported for {string_pack_path.name}: {error}")
 
+    def _logical_id_text(self, entry: ArchiveEntry) -> str:
+        """Format a logical ID for the manifest; blank when table1 has no mapping."""
+        logical_id = self.archive.logical_id_of(entry.index)
+        if logical_id is None:
+            return ""
+        return f"0x{logical_id:04x}"
+
     def _append_error_row(self, entry: ArchiveEntry, message: str) -> None:
         self.csv_data.append(
             {
-                "id": entry.index,
+                "physical_id": entry.index,
+                "logical_id": self._logical_id_text(entry),
                 "section": "",
                 "sub_group": hex(entry.group_hash),
                 "type": "ERROR",
@@ -172,7 +185,8 @@ class ArchiveExtractor:
 
         manifest_path = self.output_dir / f"{self.archive.filepath.stem}_resources.csv"
         headers = [
-            "id",
+            "physical_id",
+            "logical_id",
             "section",
             "sub_group",
             "type",
@@ -230,6 +244,7 @@ def unpack_directory(
     clean: bool = True,
     assume_yes: bool = False,
     confirm: Callable[[list[Path]], bool] | None = None,
+    by_section: bool = False,
 ) -> list[ExtractionResult]:
     """Extract all BIG files in an asset package directory."""
     input_dir = Path(input_dir).resolve()
@@ -271,6 +286,11 @@ def unpack_directory(
                 results.append(extractor.extract_all())
         except Exception as error:
             logger.error(f"Failed to unpack {archive_path.name}: {error}")
+
+    # Section labelling is a post-pass: the keyset that defines the table is
+    # itself a resource, and it usually sits after the entries it describes.
+    if by_section and results:
+        label_output_directory(output_dir)
 
     return results
 

@@ -25,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     unpack_parser.add_argument("--no-recursive", action="store_true")
     unpack_parser.add_argument("--no-clean", action="store_true")
     unpack_parser.add_argument("--yes", action="store_true", help="Skip cleanup confirmation")
+    unpack_parser.add_argument(
+        "--by-section",
+        action="store_true",
+        help="Fill the section column of each resource manifest from the pack keyset",
+    )
 
     search_parser = subparsers.add_parser("search", help="Search binary content")
     search_parser.add_argument("input", type=Path)
@@ -68,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
             clean=not args.no_clean,
             assume_yes=args.yes,
             confirm=_confirm_cleanup,
+            by_section=args.by_section,
         )
         failed_count = 0
         for result in results:
