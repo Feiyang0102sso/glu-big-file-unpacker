@@ -1,21 +1,72 @@
-# big-tool Domain Terms
+# BIG 资源寻址
 
-## Asset Package
+本文统一 Gun Bros 的 BIG 容器、资源句柄与字符串索引术语；资源寻址使用包信息和资源句柄，不能概括为“游戏只认 table1”。样本范围为 `DATAS/asserts_100`、`asserts_240`、`asserts_360`
 
-A directory provided by the user. It contains one or more `.big` files and their related resources. The input for `unpack` is the asset package directory, not a single archive file.
+## 术语
 
-## BIG Archive
+### 容器与位置
 
-A `.big` file. It contains a file header, a main directory, and resource data blocks. Each resource is located by its group hash and offset.
+**BIG 包（pack）**：
+资源所属的 `.big` 容器，也是解析资源句柄时的包上下文；不同包中的相同逻辑 ID 不能直接视为同一个资源。
 
-## Resource
+**BIG TOC（容器资源目录）**：
+由 table1 的逻辑 ID 映射和 table2 的资源块定位表共同组成的容器目录。
+_避免混称_：keyset、资源名称目录。
 
-A data block in the main directory of a BIG archive. After unpacking, it is written to a directory based on its group hash. Its file extension is guessed from its content.
+**table1（逻辑 ID 区间映射表）**：
+将若干逻辑 ID 区间映射到 table2 索引区间的表；每项描述一个区间，而不是单个逻辑 ID。它覆盖独立资源块，不直接列出字符串包中的每条字符串。
 
-## Extraction Output
+**table2（资源块定位表）**：
+按条目记录资源类别 `groupHash` 和资源块在 `.big` 中的绝对偏移的表。条目顺序对应资源块顺序，不代表逻辑 ID 连续。
 
-The `<input directory name>_out` directory next to the input directory. Each BIG archive has a subdirectory with the same name.
+**table2 索引（table2 index）**：
+资源块在 table2 中从零开始的条目序号，也是解包文件名中资源序号的来源；它不是单独存储的 ID 字段。
+_避免混称_：逻辑 ID、文件偏移。
 
-## External Blender Integration
+**资源块偏移（resource offset）**：
+资源块在原始 `.big` 文件中的起始字节位置。偏移按资源块排列顺序递增，不是等差序号，也不是解压后文件中的内部偏移。
 
-In the future, the tool may call Blender on the user's computer from the command line. Blender will then run the animation import script. This is not part of the current Python core package and does not depend on `bpy`.
+### ID 与句柄
+
+**包内逻辑 ID（logical resource ID）**：
+资源在所属包的逻辑编号体系中的标识，独立资源块与字符串子条目均可占用该编号体系。它不等于 table1 的条目序号、table2 索引或文件偏移。
+
+**资源句柄（resource handle）**：
+包含逻辑 ID、资源类型及聚合标志等信息的完整资源引用值，需要在包上下文中解释。句柄与它包含的逻辑 ID 不是同一个值。
+
+**普通句柄（ordinary handle）**：
+引用独立资源块的非聚合句柄，其逻辑 ID 经 table1 映射到 table2 索引，再由 table2 定位资源块。
+
+**聚合句柄（aggregate handle）**：
+引用聚合资源内部子条目的句柄；当前字符串引用属于此类。整体聚合资源仍需经容器目录定位，但子条目的逻辑 ID 由聚合资源内部索引解析，不能直接套用普通句柄的 table1 映射。
+
+**table1 空洞（unmapped logical IDs）**：
+table1 已映射逻辑 ID 区间之间未被该表覆盖的编号范围，不等于未使用的 ID。36 个样本中，这些空洞精确对应 `0x0002–0x00FF` 的 254 个保留编号加全部字符串子条目 ID，而不是只加 keyset 中出现的字符串 ID。
+
+### keyset 与字符串
+
+**keyset（资源句柄清单）**：
+资源类别 `0x69E5D35C` 下保存资源句柄序列的资源；它提供句柄或区间基址，不负责建立逻辑 ID 到物理位置的映射。清单中的普通句柄与聚合句柄分别使用各自的解析路径。
+_避免混称_：BIG TOC、table1、物理资源目录。
+
+**`___GAME_TOC_KEYSET`（游戏对象索引 keyset）**：
+用于游戏对象寻址的一份特定 keyset，包含类型区间基址及字符串聚合句柄部分；其名称中的 `TOC` 不代表所有 keyset 都是容器目录。当前样本中，1.0.0、2.4.0、3.6.0 的非聚合前缀分别有 31、32、33 项，字符串部分不保证覆盖整个字符串包。
+
+**配套字符串 keyset（名称哈希 `0x0042F53B`）**：
+每个包中与 `___GAME_TOC_KEYSET` 配套的纯字符串句柄清单；36 个样本中，它都与前者的聚合尾部逐项相同。33 个非 pack0 包的清单覆盖全部字符串，三个 pack0 则分别只覆盖 399/415、810/831、853/874 条（依次为 1.0.0、2.4.0、3.6.0），因此“聚合条目数等于字符串总数”不是所有包或所有 keyset 的通用性质。
+
+**string_pack（字符串包）**：
+资源类别 `0x69E4C505` 下承载字符串子条目及其内部索引的聚合资源；整个包与其中每条字符串具有不同的逻辑 ID。当前样本中，字符串包本身的逻辑 ID 为 `0x0001`，对应 table2 索引 `0`。
+
+**字符串逻辑 ID（string logical ID）**：
+字符串子条目在包内逻辑编号体系中的 ID，位于 table1 为字符串留下的空洞，由 string_pack 内部索引解析。pack1 3.6.0 的第一条字符串逻辑 ID 为 `0x0236`，完整聚合句柄为 `0x21FF0236`。
+
+**字符串 ID 区间（string ID range）**：
+字符串子条目在包内逻辑编号体系中占用的连续编号段。当前非 pack0 包各占一段，而 pack0 各占两段，所以不能一律把所有字符串的序号当作相对于同一起始 ID 的连续增量。
+
+**字符串条目序号（string entry index）**：
+字符串在 string_pack 内从零开始的排列序号；当前导出字符串 CSV 的 `id` 列使用此序号。它不同于字符串逻辑 ID，例如 pack1 3.6.0 的序号 `0` 对应逻辑 ID `0x0236`。
+
+**资源名称目录（resource name directory）**：
+将资源名称哈希关联到句柄或值的目录；运行时的 `CResPackTOC` 属于这一层。名称查询得到句柄后，仍需按普通或聚合资源的路径继续定位。
+_避免混称_：BIG TOC、keyset。
