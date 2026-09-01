@@ -3,7 +3,7 @@
 //
 //      File: enemy_template.bt
 //   Authors: Feiyang
-//   Version: 0.4
+//   Version: 0.5
 //   Purpose: Roughly inspect one Gun Bros enemy template.
 //  Category: Game / Big Assets
 // File Mask: pack1_xga_0048_0x5457.bin
@@ -15,6 +15,18 @@
 
     The compiled Flow Script is only colored and is not decoded.
     Its length varies per enemy, so it is measured instead of hardcoded.
+
+    Everything else follows the read order of CEnemy::Template::Init:
+
+        ubyte             debug script flag
+        CGameAssetRef     display name string
+        CScript           compiled flow script
+        CMoveSetMesh      meshes, textures and animation moves
+        GameObjectRef     bullet fired by this enemy
+        uint16 uint16     experience and Xplodium paid on death
+        ubyte  ubyte      unread flag, collision radius
+        uint16 uint16     draw scale and UI scale, both percent
+        CCollisionData    hit segments, empty when the radius is used instead
 */
 
 LittleEndian();
@@ -27,6 +39,9 @@ LittleEndian();
 const int COLOR_FLAG = 0xD0D0D0;
 const int COLOR_REFERENCE = 0xFFE0B2;
 const int COLOR_SCRIPT = 0xD7C6FF;
+const int COLOR_MOVE_SET = 0xC8E6C9;
+const int COLOR_STATS = 0xB3E5FC;
+const int COLOR_COLLISION = 0xE1D5C4;
 
 
 // ------------------------------------------------
@@ -186,9 +201,246 @@ struct CompiledFlowScript{
 
 
 // ------------------------------------------------
+// Part 4: Move set mesh
+// ------------------------------------------------
+
+/*
+    CMoveSetMesh::Init.
+
+    A MeshConfig pairs one mesh with one texture. Both bytes are Section local
+    indexes: the engine adds the pack base of the MODEL Section (0x1E) to
+    meshIndex and the base of the PNG Section (0x1C) to textureIndex.
+
+    A move is one animation clip played on one of those meshes. Its frame
+    numbers index the mesh keyframe timeline, so a single mesh can carry every
+    move of the enemy.
+*/
+
+typedef struct {
+    ubyte meshIndex <format=decimal>;
+    ubyte textureIndex <format=decimal>;
+} MeshConfig <read=meshConfigFormat>;
+
+
+typedef struct {
+    uint16 frameNumber <format=decimal>;
+    ubyte soundIndex <format=decimal>;
+} MoveEvent <read=moveEventFormat>;
+
+
+typedef struct {
+    ubyte meshConfigIndex <format=decimal>;
+    uint16 firstFrame <format=decimal>;
+    uint16 lastFrame <format=decimal>;
+
+    // 1 restarts the clip when the same move is triggered again, 0 lets the
+    // running clip finish first.
+    ubyte restartOnRetrigger <format=decimal>;
+
+    // 16.16 fixed point, multiplied into the frame delta time.
+    int32 playbackSpeed;
+
+    // Read into the move but never used by any 3.6.0 code path. Zero in every
+    // enemy template, one in a few gun moves.
+    uint32 unusedField;
+
+    ubyte eventCount <format=decimal>;
+    if (eventCount > 0) {
+        MoveEvent events[eventCount] <optimize=false>;
+    }
+} MoveEntry <read=moveEntryFormat>;
+
+
+struct MoveSetMesh{
+    uint32 meshPackHash <format=hex>;
+
+    ubyte meshConfigCount <format=decimal>;
+    if (meshConfigCount > 0) {
+        MeshConfig meshConfigs[meshConfigCount] <optimize=false>;
+    }
+
+    ubyte moveCount <format=decimal>;
+    if (moveCount > 0) {
+        MoveEntry moves[moveCount] <optimize=false>;
+    }
+} ;
+
+
+string meshConfigFormat(MeshConfig &config) {
+    local string result;
+    SPrintf(result, "mesh %d texture %d", config.meshIndex, config.textureIndex);
+    return result;
+}
+
+
+string moveEventFormat(MoveEvent &event) {
+    local string result;
+    SPrintf(result, "frame %d sound %d", event.frameNumber, event.soundIndex);
+    return result;
+}
+
+
+string moveEntryFormat(MoveEntry &move) {
+    local string result;
+    local double speed = move.playbackSpeed / 65536.0;
+
+    SPrintf(
+        result,
+        "config %d frames %d-%d speed %.2f events %d",
+        move.meshConfigIndex,
+        move.firstFrame,
+        move.lastFrame,
+        speed,
+        move.eventCount
+    );
+
+    return result;
+}
+
+
+// ------------------------------------------------
+// Part 5: Bullet reference
+// ------------------------------------------------
+
+/*
+    IGameObject::GameObjectRef::Init. The object id byte is only stored when
+    the pack hash is set, so this block is four or five bytes long.
+
+    CEnemy::Bind resolves it as game object type 3, which is BULLET.
+*/
+
+typedef struct {
+    uint32 bulletPackHash <format=hex>;
+    if (bulletPackHash != 0) {
+        ubyte bulletObjectId <format=decimal>;
+    }
+} BulletReference <read=bulletReferenceFormat>;
+
+
+string bulletReferenceFormat(BulletReference &reference) {
+    local int packNumber = reference.bulletPackHash - STANDARD_PACK_HASH_BASE;
+    local string result;
+
+    if (reference.bulletPackHash == 0) {
+        return "no bullet";
+    }
+
+    if (packNumber >= 0 && packNumber <= STANDARD_PACK_MAX_NUMBER) {
+        SPrintf(result, "pack%d bullet %d", packNumber, reference.bulletObjectId);
+        return result;
+    }
+
+    SPrintf(
+        result,
+        "packHash 0x%08X bullet %d",
+        reference.bulletPackHash,
+        reference.bulletObjectId
+    );
+
+    return result;
+}
+
+
+// ------------------------------------------------
+// Part 6: Stats
+// ------------------------------------------------
+
+struct EnemyStats{
+    // Both rewards pass through the armour, promo and friend multipliers in
+    // CLevel::OnEnemyKilled before reaching the player.
+    uint16 experienceReward <format=decimal>;
+    uint16 xplodiumReward <format=decimal>;
+
+    // Copied to CEnemy+864 and never read back in 3.6.0. It is zero only on
+    // templates that pay no reward at all, which is as far as the code goes.
+    ubyte unreadFlag <format=decimal>;
+
+    // CEnemy::GetRadius, used when the collision data below is empty.
+    ubyte collisionRadius <format=decimal>;
+
+    // Percentages. The first scales the drawn mesh, the second the HUD icon.
+    uint16 drawScalePercent <format=decimal>;
+    uint16 uiScalePercent <format=decimal>;
+} ;
+
+
+// ------------------------------------------------
+// Part 7: Collision data
+// ------------------------------------------------
+
+/*
+    CCollisionData::Load. The points are the outline of the enemy and every
+    segment joins two of them, which is what CCollisionData::TestRay
+    intersects. partId groups segments so a script can switch one body part
+    on or off.
+
+    Most enemies store no points at all and fall back to collisionRadius.
+*/
+
+typedef struct {
+    int32 x;
+    int32 y;
+} CollisionPoint <read=collisionPointFormat>;
+
+
+typedef struct {
+    ubyte partId <format=decimal>;
+    uint16 firstPointIndex <format=decimal>;
+    uint16 secondPointIndex <format=decimal>;
+} CollisionSegment <read=collisionSegmentFormat>;
+
+
+struct CollisionData{
+    uint16 pointCount <format=decimal>;
+    if (pointCount > 0) {
+        CollisionPoint points[pointCount] <optimize=false>;
+    }
+
+    uint16 segmentCount <format=decimal>;
+    if (segmentCount > 0) {
+        CollisionSegment segments[segmentCount] <optimize=false>;
+    }
+} ;
+
+
+string collisionPointFormat(CollisionPoint &point) {
+    local string result;
+    SPrintf(result, "%d, %d", point.x, point.y);
+    return result;
+}
+
+
+string collisionSegmentFormat(CollisionSegment &segment) {
+    local string result;
+
+    SPrintf(
+        result,
+        "part %d: point %d - point %d",
+        segment.partId,
+        segment.firstPointIndex,
+        segment.secondPointIndex
+    );
+
+    return result;
+}
+
+
+// ------------------------------------------------
 // Main
 // ------------------------------------------------
 
 TemplateFlag templateFlag;
-CommonStringRef scriptNameReference <bgcolor=COLOR_REFERENCE>;
+
+// CEnemy::Template::CreateNameString reads this one as the displayed name.
+CommonStringRef nameStringReference <bgcolor=COLOR_REFERENCE>;
+
 CompiledFlowScript compiledFlowScript;
+MoveSetMesh moveSetMesh <bgcolor=COLOR_MOVE_SET>;
+BulletReference bulletReference <bgcolor=COLOR_REFERENCE>;
+EnemyStats enemyStats <bgcolor=COLOR_STATS>;
+CollisionData collisionData <bgcolor=COLOR_COLLISION>;
+
+// A correct template ends on the last byte of the file.
+if (FTell() != FileSize()) {
+    Warning("Parsed %Ld of %Ld bytes.", FTell(), FileSize());
+}
