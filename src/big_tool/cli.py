@@ -41,9 +41,17 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--size-min", type=_parse_int)
     search_parser.add_argument("--size-max", type=_parse_int)
 
-    model_parser = subparsers.add_parser("model-convert", help="Convert BIN models")
+    model_parser = subparsers.add_parser(
+        "model-convert",
+        help="Convert the meshes of every MODEL section under a directory",
+    )
     model_parser.add_argument("input", type=Path)
-    model_parser.add_argument("--output", type=Path)
+    model_parser.add_argument(
+        "--output",
+        type=Path,
+        help="Root for the per-pack output folders "
+             "(default: a _converted_models folder inside each pack)",
+    )
     return parser
 
 
