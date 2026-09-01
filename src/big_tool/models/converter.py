@@ -1,10 +1,18 @@
 """Convert game BIN models to OBJ and JSON."""
 
 import json
+import shutil
 import struct
 from pathlib import Path
 
+from big_tool.big_archive.big_section import resource_index_of
 from big_tool.logger import logger
+from big_tool.models.mesh_binding import (
+    build_bindings,
+    group_textures_by_mesh,
+    index_resource_files,
+    pack_short_name,
+)
 
 
 # ------------------------------------------------------------------
@@ -14,9 +22,20 @@ from big_tool.logger import logger
 # Section folder that holds the meshes, created by `unpack --by-section`.
 # An unused Section is named "<n>_MODEL_empty" and this pattern skips it.
 MODEL_SECTION_PATTERN = "*_MODEL"
-CONVERTED_DIR_NAME = "_converted_models"
+# Output folder, tagged with the pack it came from so the folders stay
+# distinguishable once they are moved out of the unpack tree. The textures a
+# pack's meshes use are copied inside it, which keeps a converted folder
+# self-contained: it can be moved anywhere and the MTL paths still resolve.
+CONVERTED_DIR_PREFIX = "_converted_models"
+TEXTURE_DIR_NAME = "textures"
 MANIFEST_PATTERN = "*_resources.csv"
 MODEL_EXTENSION = ".bin"
+MATERIAL_EXTENSION = ".mtl"
+
+# A mesh whose UVs are nothing but the four corners was never unwrapped: every
+# face would show the whole texture atlas. Those are placeholder boxes, so they
+# get no material even when a template binds one to them.
+UV_CORNERS = frozenset({(0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0)})
 
 # Coordinate handling. Nothing is converted: the game's own vertex and UV
 # values are written straight out, so the mesh and its texture stay consistent
@@ -39,15 +58,35 @@ UV_SIZE = 8
 INDEX_SIZE = 2
 
 
+def save_mtl(filename: Path, materials: list[tuple[str, str]]) -> None:
+    """Save a material library: one entry per texture bound to the mesh.
+
+    Only the diffuse map is written. The game carries no other material data,
+    so anything else would be invented.
+    """
+    with Path(filename).open("w", encoding="utf-8") as output:
+        output.write("# Batch Exported Glu Materials\n")
+        for name, texture_path in materials:
+            output.write(f"newmtl {name}\n")
+            output.write(f"map_Kd {texture_path}\n\n")
+
+
 def save_obj(
     filename: Path,
     vertices: list[tuple[float, float, float]],
     uvs: list[tuple[float, float]],
     indices: list[int],
+    materials: list[tuple[str, str]] | None = None,
 ) -> None:
-    """Save an OBJ mesh."""
+    """Save an OBJ mesh, with a material library when its textures are known."""
     with Path(filename).open("w", encoding="utf-8") as output:
         output.write("# Batch Exported Glu Mesh\n")
+        if materials:
+            # A mesh with several textures keeps them all in one library and
+            # starts on the first; the rest stay selectable in the importer.
+            library_name = Path(filename).with_suffix(MATERIAL_EXTENSION).name
+            output.write(f"mtllib {library_name}\n")
+            output.write(f"usemtl {materials[0][0]}\n")
         for vertex in vertices:
             output.write(f"v {vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}\n")
         for uv in uvs:
@@ -72,6 +111,11 @@ def save_obj(
             flip = not flip
 
 
+def is_unwrapped(uvs: list[tuple[float, float]]) -> bool:
+    """Return whether a mesh carries real UVs rather than corner defaults."""
+    return not set(uvs) <= UV_CORNERS
+
+
 class MeshFormatError(ValueError):
     """Raised when a file is not a readable Glu mesh."""
 
@@ -83,7 +127,11 @@ def _read_exact(file, size: int) -> bytes:
     return data
 
 
-def convert_single_bin(input_file: Path, output_prefix: Path) -> tuple[Path, Path]:
+def convert_single_bin(
+    input_file: Path,
+    output_prefix: Path,
+    materials: list[tuple[str, str]] | None = None,
+) -> tuple[Path, Path]:
     """Convert one model BIN file into an OBJ mesh and an animation JSON."""
     input_file = Path(input_file).resolve()
     output_prefix = Path(output_prefix).resolve()
@@ -110,6 +158,12 @@ def convert_single_bin(input_file: Path, output_prefix: Path) -> tuple[Path, Pat
                 v = 1.0 - v
             uvs.append((u, v))
 
+        if materials and not is_unwrapped(uvs):
+            logger.warning(
+                f"{input_file.name}: UVs are corner defaults, writing no material"
+            )
+            materials = None
+
         animation_start = file.tell()
         frame_stride = FRAME_TIME_SIZE + bone_count * BONE_FRAME_SIZE + vertex_count * VERTEX_SIZE
         frames: list[dict[str, object]] = []
@@ -132,7 +186,9 @@ def convert_single_bin(input_file: Path, output_prefix: Path) -> tuple[Path, Pat
     }
     obj_path = output_prefix.with_suffix(".obj")
     json_path = output_prefix.with_suffix(".json")
-    save_obj(obj_path, frames[0]["vertices"], uvs, indices)
+    save_obj(obj_path, frames[0]["vertices"], uvs, indices, materials)
+    if materials:
+        save_mtl(output_prefix.with_suffix(MATERIAL_EXTENSION), materials)
     json_path.write_text(json.dumps(animation_data), encoding="utf-8")
     return obj_path, json_path
 
@@ -166,15 +222,59 @@ def find_pack_dir(model_dir: Path) -> Path | None:
     return None
 
 
+def converted_dir_name(pack_dir: Path | None) -> str:
+    """Return the output folder name for a pack."""
+    if pack_dir is None:
+        return CONVERTED_DIR_PREFIX
+    return f"{CONVERTED_DIR_PREFIX}_{pack_short_name(pack_dir)}"
+
+
 def resolve_output_dir(model_dir: Path, output_root: Path | None) -> Path:
     """Return where one MODEL folder's conversions go."""
     pack_dir = find_pack_dir(model_dir)
-    if output_root is None:
-        base = pack_dir if pack_dir is not None else model_dir
-        return base / CONVERTED_DIR_NAME
+    base = output_root if output_root is not None else (pack_dir or model_dir)
+    return base / converted_dir_name(pack_dir)
+
+
+def build_materials(pack_dir: Path | None, target_dir: Path) -> dict[int, list[tuple[str, str]]]:
+    """Return each mesh's materials, keyed by the mesh's table2 index.
+
+    A material is a name and the path of its texture relative to the folder the
+    OBJ is written into, which is what an MTL library needs.
+    """
     if pack_dir is None:
-        return output_root
-    return output_root / pack_dir.name
+        return {}
+
+    bindings = build_bindings(pack_dir)
+    if not bindings:
+        return {}
+
+    resource_files = index_resource_files(pack_dir)
+    texture_dir = target_dir / TEXTURE_DIR_NAME
+    copied_names: set[str] = set()
+
+    materials_by_mesh: dict[int, list[tuple[str, str]]] = {}
+    for mesh_index, texture_indexes in group_textures_by_mesh(bindings).items():
+        materials: list[tuple[str, str]] = []
+        for texture_index in texture_indexes:
+            texture_path = resource_files.get(texture_index)
+            if texture_path is None:
+                continue
+
+            # Shared textures are common, so copy each one only once.
+            if texture_path.name not in copied_names:
+                texture_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(texture_path, texture_dir / texture_path.name)
+                copied_names.add(texture_path.name)
+            materials.append((texture_path.stem, f"{TEXTURE_DIR_NAME}/{texture_path.name}"))
+        if materials:
+            materials_by_mesh[mesh_index] = materials
+
+    logger.debug(
+        f"{pack_dir.name}: materials for {len(materials_by_mesh)} meshes, "
+        f"{len(copied_names)} textures copied"
+    )
+    return materials_by_mesh
 
 
 def convert_directory(directory: Path, output_dir: Path | None = None) -> int:
@@ -193,12 +293,14 @@ def convert_directory(directory: Path, output_dir: Path | None = None) -> int:
     for model_dir in model_dirs:
         target_dir = resolve_output_dir(model_dir, output_root)
         target_dir.mkdir(parents=True, exist_ok=True)
+        materials_by_mesh = build_materials(find_pack_dir(model_dir), target_dir)
 
         model_files = sorted(model_dir.glob(f"*{MODEL_EXTENSION}"))
         for model_file in model_files:
             # A non-mesh file in the folder must not stop the batch.
             try:
-                convert_single_bin(model_file, target_dir / model_file.stem)
+                materials = materials_by_mesh.get(resource_index_of(model_file))
+                convert_single_bin(model_file, target_dir / model_file.stem, materials)
                 converted_count += 1
             except (OSError, MeshFormatError, struct.error) as error:
                 logger.warning(f"Skipping file {model_file.name}: {error}")
