@@ -13,7 +13,15 @@ Two encodings exist, and a template type may use either or both:
   length ``CScript``, so the offsets are constant.
 * ``CMoveSetMesh`` - a one byte mesh index and a one byte texture index inside
   an animation block. ENEMY, GUN and PLAYER carry one, but it sits *after*
-  ``CScript``, so it has to be located by scanning.
+  ``CScript``, so it has to be located by scanning. It never names the same mesh
+  as the fixed refs: a gun's refs point at that gun's own model, while its
+  MeshConfig points at the arms every gun shares. Only ``CEnemy`` asks
+  ``CMoveSetMesh::Load`` to load the image, because a shared part is already
+  loaded by whoever owns it, but the texture byte still names the right texture.
+
+The player has no texture of its own: the armour system swaps one onto the
+player mesh. An ARMOR template with no mesh of its own carries exactly that,
+one per brother when its first byte is 1.
 """
 
 import struct
@@ -62,6 +70,13 @@ FIXED_REF_SLOTS = {
 
 # Sections whose templates carry a CMoveSetMesh block.
 MOVE_SET_MESH_SECTIONS = ("_ENEMY", "_GUN", "_PLAYER")
+
+ARMOR_SECTION_SUFFIX = "_ARMOR"
+PLAYER_SECTION_SUFFIX = "_PLAYER"
+
+# Every texture ref of an ARMOR template. A template with no mesh uses these to
+# skin the player instead.
+ARMOR_TEXTURE_OFFSETS = (9, 26, 35, 43)
 
 # Bounds used while scanning for a CMoveSetMesh. They only have to be loose
 # enough to keep every real block and tight enough to kill random byte runs.
@@ -330,6 +345,21 @@ def read_fixed_slots(
     return pairs
 
 
+def read_armor_skins(data: bytes, pack_hash: int, texture_count_limit: int) -> list[int]:
+    """Read the textures of an ARMOR template that owns no mesh.
+
+    Those textures are worn by the player mesh rather than by a mesh of the
+    armour itself. When the template's first byte is 1 the slots hold one
+    variant per brother, which is why a body can have several.
+    """
+    textures: list[int] = []
+    for offset in ARMOR_TEXTURE_OFFSETS:
+        texture_index = read_asset_ref(data, offset, pack_hash, texture_count_limit)
+        if texture_index is not None and texture_index not in textures:
+            textures.append(texture_index)
+    return textures
+
+
 # ------------------------------------------------------------------
 # Driver
 # ------------------------------------------------------------------
@@ -352,6 +382,8 @@ def build_bindings(pack_dir: Path) -> list[MeshBinding]:
     template_paths = index_resource_files(pack_dir)
 
     bindings: list[MeshBinding] = []
+    player_meshes: list[int] = []
+    skins: list[tuple[int, str, int]] = []
     for row in rows:
         section = row[SECTION_COLUMN]
         if not section or section.endswith(EMPTY_SECTION_SUFFIX):
@@ -362,17 +394,28 @@ def build_bindings(pack_dir: Path) -> list[MeshBinding]:
         if template_path is None:
             continue
 
-        pairs: list[tuple[int, int]] = []
-        if section.endswith(MOVE_SET_MESH_SECTIONS) or any(
-            section.endswith(suffix) for suffix in FIXED_REF_SLOTS
-        ):
-            data = template_path.read_bytes()
-            pairs += read_fixed_slots(
-                data, section, pack_hash, model_range.length, png_range.length
-            )
-            pairs += find_move_set_mesh(
-                data, section, pack_hash, model_range.length, png_range.length
-            )
+        is_fixed_ref = any(section.endswith(suffix) for suffix in FIXED_REF_SLOTS)
+        if not is_fixed_ref and not section.endswith(MOVE_SET_MESH_SECTIONS):
+            continue
+
+        data = template_path.read_bytes()
+        pairs = read_fixed_slots(
+            data, section, pack_hash, model_range.length, png_range.length
+        )
+        move_set_pairs = find_move_set_mesh(
+            data, section, pack_hash, model_range.length, png_range.length
+        )
+
+        pairs += move_set_pairs
+        if section.endswith(PLAYER_SECTION_SUFFIX):
+            for mesh_local, _texture_local in move_set_pairs:
+                player_meshes.append(model_range.first_index + mesh_local)
+
+        if section.endswith(ARMOR_SECTION_SUFFIX) and not pairs:
+            for texture_local in read_armor_skins(data, pack_hash, png_range.length):
+                skins.append(
+                    (template_index, section, png_range.first_index + texture_local)
+                )
 
         for mesh_local, texture_local in pairs:
             bindings.append(
@@ -384,7 +427,17 @@ def build_bindings(pack_dir: Path) -> list[MeshBinding]:
                 )
             )
 
-    logger.debug(f"{pack_dir.name}: {len(bindings)} mesh bindings")
+    # Which player mesh a skin lands on is decided by the render code, which is
+    # not read here, so every skin is offered on every player mesh. That can
+    # over-offer, but it never drops a texture the player can actually wear.
+    for template_index, section, texture_index in skins:
+        for mesh_index in player_meshes:
+            bindings.append(MeshBinding(template_index, section, mesh_index, texture_index))
+
+    logger.debug(
+        f"{pack_dir.name}: {len(bindings)} mesh bindings, "
+        f"{len(skins)} armour skins on {len(player_meshes)} player meshes"
+    )
     return bindings
 
 
