@@ -4,8 +4,11 @@ Works on an unpacked pack folder produced by ``unpack --by-section``; the
 Section names are what locate the TILELAYER, TILESET, PROP and PNG resources.
 """
 
-from dataclasses import dataclass
+import subprocess
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
 
 from PIL import Image, ImageChops
 
@@ -60,9 +63,33 @@ OPAQUE_BLACK = (0, 0, 0, 255)
 # A loop of one full tile of scroll. CLayerTile::SetSpeed scales the script's
 # speed by 0.05 tiles per second, so one tile really takes 20 to 40 seconds.
 # That is unwatchable, so the loop is compressed rather than played at speed.
-LAVA_FRAME_COUNT = 20
-LAVA_FRAME_MS = 100
-LAVA_SCALE = 0.25
+ANIMATION_FRAME_COUNT = 60
+
+# Which way the layers drift. The real axis and speed come from the level
+# script's setTileLayerSpeed, and the script resources are not decoded, so this
+# is a choice, not a reading: down the screen, one tile per loop.
+SCROLL_STEP_X = 0
+SCROLL_STEP_Y = 1
+
+# Speed multiplier per scrolling layer, lowest layer first. pack12 stacks a
+# translucent water layer over an opaque one, which only reads as water if the
+# two drift apart, so the upper layers run faster. The real ratios are in the
+# undecoded scripts; these are a guess, kept whole so that one tile of travel
+# still closes the loop seamlessly.
+SCROLL_RATES = (1, 2, 3)
+
+# MP4: the full-resolution output. Frames are piped to ffmpeg as they are
+# drawn, because holding 60 frames of a 2816x2048 map would cost gigabytes.
+FFMPEG_COMMAND = "ffmpeg"
+MP4_FPS = 30
+MP4_CRF = "16"
+MP4_PRESET = "slow"
+
+# GIF: the small preview, unchanged from when it only ever showed lava.
+# Every third frame of the 60 gives back the original 20.
+GIF_FRAME_STRIDE = 3
+GIF_FRAME_MS = 100
+GIF_SCALE = 0.25
 
 
 @dataclass(frozen=True)
@@ -84,6 +111,19 @@ class PackAssets:
     props: list[SpriteGluRef]
     archive: SpriteGluArchive | None
     pages: list[Image.Image]
+
+
+@dataclass
+class MapRenderCache:
+    """What stays the same across the frames of one map's animation.
+
+    Only the scrolling layers move, so every other tile layer is drawn once.
+    Prop parts are cropped and flipped out of the atlas pages, which is the
+    expensive half of drawing a prop, and that result never changes either.
+    """
+
+    tile_layers: dict[int, Image.Image] = field(default_factory=dict)
+    prop_parts: dict[tuple[int, str], list[PropPart]] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------
@@ -325,34 +365,54 @@ def render_map(
     game_map: GameMap,
     assets: PackAssets,
     with_props: bool = True,
-    lava_layer: int | None = None,
-    lava_shift: tuple[int, int] = (0, 0),
+    shifts: dict[int, tuple[int, int]] | None = None,
+    cache: MapRenderCache | None = None,
 ) -> Image.Image:
-    """Compose one map into a single image."""
+    """Compose one map into a single image.
+
+    ``shifts`` scrolls individual tile layers by a pixel offset, keyed by the
+    layer's index among the tile layers. ``cache``, when given, keeps the
+    unshifted layers and the prop parts across calls so an animation does not
+    redraw them every frame.
+    """
+    if shifts is None:
+        shifts = {}
     tile_width = assets.tileset.tile_width
     tile_height = assets.tileset.tile_height
     columns, rows = game_map.grid_size()
     canvas = Image.new("RGBA", (columns * tile_width, rows * tile_height), OPAQUE_BLACK)
 
     for index, layer in enumerate(game_map.tile_layers):
-        shift_x = 0
-        shift_y = 0
-        if index == lava_layer:
-            shift_x, shift_y = lava_shift
-        canvas.alpha_composite(
-            draw_tile_layer(
+        shift_x, shift_y = shifts.get(index, (0, 0))
+        cached = None
+        if cache is not None and not shift_x and not shift_y:
+            cached = cache.tile_layers.get(index)
+        if cached is None:
+            cached = draw_tile_layer(
                 layer, assets.tile_sprites, tile_width, tile_height,
                 columns, rows, shift_x, shift_y,
             )
-        )
+            if cache is not None and not shift_x and not shift_y:
+                cache.tile_layers[index] = cached
+        canvas.alpha_composite(cached)
 
     if with_props:
-        _draw_props(canvas, game_map, assets)
+        _draw_props(canvas, game_map, assets, cache)
     return canvas
 
 
-def _draw_props(canvas: Image.Image, game_map: GameMap, assets: PackAssets) -> int:
-    """Draw every prop instance, and return how many parts were drawn."""
+def _draw_props(
+    canvas: Image.Image,
+    game_map: GameMap,
+    assets: PackAssets,
+    cache: MapRenderCache | None = None,
+) -> int:
+    """Draw every prop instance, and return how many parts were drawn.
+
+    Props are redrawn every frame rather than kept as an overlay: a glow sprite
+    is added to what is already on the canvas, so it needs the scrolled layers
+    underneath it to be there already.
+    """
     instances = []
     for group in game_map.object_groups:
         if group.object_type != OBJECT_TYPE_PROP:
@@ -367,35 +427,38 @@ def _draw_props(canvas: Image.Image, game_map: GameMap, assets: PackAssets) -> i
             if instance.local_index >= len(assets.props):
                 continue
             prop = assets.props[instance.local_index]
-            for part in prop_parts(prop, layer, assets):
+            parts = None
+            if cache is not None:
+                parts = cache.prop_parts.get((instance.local_index, layer))
+            if parts is None:
+                parts = prop_parts(prop, layer, assets)
+                if cache is not None:
+                    cache.prop_parts[(instance.local_index, layer)] = parts
+            for part in parts:
                 paste_part(canvas, part, instance.x + part.x, instance.y + part.y)
                 drawn += 1
     return drawn
 
 
-def find_lava_layer(game_map: GameMap, assets: PackAssets) -> int | None:
-    """Return the tile layer that scrolls, or None.
+def find_scrolling_layers(game_map: GameMap) -> list[int]:
+    """Return the tile layers that drift, lowest first.
 
-    The scrolling layer is the one paved entirely with tiles from the flow
-    atlas, which is the last image the tileset loads. It is the layer the level
-    scripts address as index 0 in ``setTileLayerSpeed``.
+    A scrolling layer is one seamless texture tiled across the whole layer, so
+    it uses exactly one tile id. That is what separates a lava sheet, a
+    starfield or a water surface from a ground layer, which always mixes
+    several tiles. The level scripts address these by the same index, counting
+    tile layers only (the ``setTileLayerSpeed`` case at
+    ``gunbros_3.6.0_IOS.c:117851`` skips every layer that is not a tile layer).
     """
-    flow_image = len(assets.tileset.images) - 1
-    if flow_image < 1:
-        return None
-    flow_tiles = set()
-    for index, tile in enumerate(assets.tileset.tiles):
-        if tile.image_index == flow_image:
-            flow_tiles.add(index)
-
+    found = []
     for index, layer in enumerate(game_map.tile_layers):
         used = set()
         for tile_id, _flags in layer.cells:
             used.add(tile_id)
         used.discard(EMPTY_TILE)
-        if used and used <= flow_tiles:
-            return index
-    return None
+        if len(used) == 1:
+            found.append(index)
+    return found
 
 
 # ------------------------------------------------------------------
@@ -403,7 +466,7 @@ def find_lava_layer(game_map: GameMap, assets: PackAssets) -> int | None:
 # ------------------------------------------------------------------
 
 def render_pack(pack_dir: Path, output_dir: Path, with_props: bool = True,
-                lava_gif: bool = False) -> int:
+                animated_background: bool = False) -> int:
     """Render every map in one pack and return how many were written."""
     assets = load_pack_assets(pack_dir)
     if assets is None:
@@ -424,44 +487,127 @@ def render_pack(pack_dir: Path, output_dir: Path, with_props: bool = True,
         if not game_map.tile_layers:
             continue
         name = path.stem
-        image = render_map(game_map, assets, with_props)
+        # The still and the animation share a cache: the still fills it with
+        # every unshifted layer and every prop part, which is most of the work.
+        cache = MapRenderCache()
+        image = render_map(game_map, assets, with_props, cache=cache)
         image.convert("RGB").save(output_dir / f"{name}.png")
         columns, rows = game_map.grid_size()
         logger.info(f"{name}: {columns}x{rows} tiles -> {image.size[0]}x{image.size[1]}px")
         written += 1
 
-        if lava_gif:
-            _write_lava_gif(game_map, assets, with_props, output_dir / f"{name}_lava.gif")
+        if animated_background:
+            _write_animation(game_map, assets, with_props, output_dir, name, cache)
     return written
 
 
-def _write_lava_gif(
-    game_map: GameMap, assets: PackAssets, with_props: bool, output_path: Path
+def _layer_shifts(
+    layers: list[int], step: int, tile_width: int, tile_height: int
+) -> dict[int, tuple[int, int]]:
+    """Return each scrolling layer's pixel offset at one step of the loop."""
+    shifts = {}
+    for order, layer_index in enumerate(layers):
+        # Past the end of SCROLL_RATES every further layer keeps the last rate;
+        # no sample stacks more than two scrolling layers.
+        rate = SCROLL_RATES[min(order, len(SCROLL_RATES) - 1)]
+        travel = rate * step / ANIMATION_FRAME_COUNT
+        shift_x = round(tile_width * SCROLL_STEP_X * travel) % tile_width
+        shift_y = round(tile_height * SCROLL_STEP_Y * travel) % tile_height
+        shifts[layer_index] = (shift_x, shift_y)
+    return shifts
+
+
+def _write_animation(
+    game_map: GameMap,
+    assets: PackAssets,
+    with_props: bool,
+    output_dir: Path,
+    name: str,
+    cache: MapRenderCache,
 ) -> None:
-    """Write a seamless loop of the scrolling lava layer, if the map has one."""
-    lava_layer = find_lava_layer(game_map, assets)
-    if lava_layer is None:
+    """Write a seamless loop of a map's scrolling layers as MP4 and GIF.
+
+    One loop is one tile of travel, so the last frame joins back onto the
+    first. Frames are handed to ffmpeg as they are drawn and only the small
+    GIF copies are kept, because the full-resolution frames of a large map add
+    up to gigabytes.
+    """
+    layers = find_scrolling_layers(game_map)
+    if not layers:
         return
 
+    tile_width = assets.tileset.tile_width
     tile_height = assets.tileset.tile_height
-    frames = []
-    for step in range(LAVA_FRAME_COUNT):
-        shift = (0, round(tile_height * step / LAVA_FRAME_COUNT))
-        frame = render_map(game_map, assets, with_props, lava_layer, shift).convert("RGB")
-        frame = frame.resize(
-            (int(frame.width * LAVA_SCALE), int(frame.height * LAVA_SCALE)), Image.LANCZOS
-        )
-        frames.append(frame)
+    encoder = _start_mp4(output_dir / f"{name}_bak.mp4")
 
-    frames[0].save(
-        output_path, save_all=True, append_images=frames[1:],
-        duration=LAVA_FRAME_MS, loop=0, optimize=True,
+    gif_frames = []
+    for step in range(ANIMATION_FRAME_COUNT):
+        shifts = _layer_shifts(layers, step, tile_width, tile_height)
+        frame = render_map(game_map, assets, with_props, shifts, cache).convert("RGB")
+        if encoder is not None:
+            frame.save(encoder[0].stdin, format="PNG")
+        if step % GIF_FRAME_STRIDE == 0:
+            gif_frames.append(frame.resize(
+                (round(frame.width * GIF_SCALE), round(frame.height * GIF_SCALE)),
+                Image.LANCZOS,
+            ))
+
+    gif_path = output_dir / f"{name}_bak.gif"
+    gif_frames[0].save(
+        gif_path, save_all=True, append_images=gif_frames[1:],
+        duration=GIF_FRAME_MS, loop=0, optimize=True,
     )
-    logger.info(f"{output_path.name}: {LAVA_FRAME_COUNT} frames")
+    _finish_mp4(encoder, name)
+    logger.info(
+        f"{name}: animated layers {layers}, "
+        f"{ANIMATION_FRAME_COUNT} frames -> mp4, {len(gif_frames)} -> gif"
+    )
+
+
+def _start_mp4(output_path: Path) -> tuple[subprocess.Popen, IO[bytes]] | None:
+    """Open an ffmpeg process fed a stream of PNG frames, or None if it is missing.
+
+    ffmpeg's diagnostics go to a temporary file rather than a pipe. A pipe
+    nobody drains fills up after a few dozen frames, at which point ffmpeg
+    stops reading stdin and both sides wait on each other forever.
+    """
+    command = [
+        FFMPEG_COMMAND, "-y", "-loglevel", "error", "-nostats",
+        "-f", "image2pipe", "-framerate", str(MP4_FPS), "-i", "-",
+        "-c:v", "libx264", "-preset", MP4_PRESET, "-crf", MP4_CRF,
+        # yuv420p is what every player can decode; the maps are whole tiles
+        # across, so the even-size requirement is always met.
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        str(output_path),
+    ]
+    log = tempfile.TemporaryFile()
+    try:
+        process = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=log, stderr=log,
+        )
+    except FileNotFoundError:
+        log.close()
+        logger.warning("ffmpeg not found, writing the GIF only")
+        return None
+    return process, log
+
+
+def _finish_mp4(encoder: tuple[subprocess.Popen, IO[bytes]] | None, name: str) -> None:
+    """Close the frame stream and report whether ffmpeg wrote the file."""
+    if encoder is None:
+        return
+    process, log = encoder
+    process.stdin.close()
+    process.wait()
+    if process.returncode != 0:
+        log.seek(0)
+        tail = log.read().decode("utf-8", "replace").strip().splitlines()[-3:]
+        logger.warning(f"{name}: ffmpeg failed: {' | '.join(tail)}")
+    log.close()
 
 
 def render_directory(directory: Path, output_dir: Path | None = None,
-                     with_props: bool = True, lava_gif: bool = False) -> int:
+                     with_props: bool = True, animated_background: bool = False) -> int:
     """Render every pack under a directory and return the map count.
 
     Without ``output_dir`` each pack keeps its own ``_rendered_maps`` folder.
@@ -481,5 +627,5 @@ def render_directory(directory: Path, output_dir: Path | None = None,
             target_dir = pack_dir / RENDER_DIR_PREFIX
         else:
             target_dir = output_root / target_name
-        total += render_pack(pack_dir, target_dir, with_props, lava_gif)
+        total += render_pack(pack_dir, target_dir, with_props, animated_background)
     return total

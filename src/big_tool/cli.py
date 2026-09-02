@@ -67,9 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     map_parser.add_argument("--no-props", action="store_true", help="Draw the tile layers only")
     map_parser.add_argument(
-        "--lava-gif",
+        "--ani_bak",
         action="store_true",
-        help="Also write an animated loop for maps with a scrolling tile layer",
+        help="Also write an MP4 and a GIF loop of the scrolling background layers "
+             "(lava, starfield, water); needs ffmpeg on PATH for the MP4",
     )
     return parser
 
@@ -133,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
             args.input,
             args.output,
             with_props=not args.no_props,
-            lava_gif=args.lava_gif,
+            animated_background=args.ani_bak,
         )
         logger.info(f"Rendered {count} maps")
         return 0
