@@ -358,22 +358,43 @@ big-tool map-render DATAS/asserts_360_out --ani_bak
 一个循环是**一格图块的行程**，所以首尾帧自然接得上。渲染 60 帧：
 
 - **MP4** 全分辨率，x264 `crf 16` / `preset slow` / `yuv420p`，30 fps，即 2 秒一圈。
-  帧是一边画一边喂给 ffmpeg 的 —— 大图 60 帧全存内存要好几个 GB。需要 PATH 上有 ffmpeg，
-  没有就只出 GIF。
+  帧是一边画一边**以 rawvideo 原样**喂给 ffmpeg 的 —— 大图 60 帧全存内存要好几个 GB。
+  需要 PATH 上有 ffmpeg，没有就只出 GIF。
 - **GIF** 从同一批帧里每 3 帧取一张，缩到 0.25，20 帧 / 100 ms，和以前一样。
 
 逐帧只有滚动层在变，所以不滚的图块层和裁好的 prop 图元都缓存复用
 （`MapRenderCache`）。prop 本身仍要逐帧重画：辉光精灵走的是加法混合，
 需要底下已经滚过的像素。
 
-10 张有滚动层的地图，整批约 6 分钟。
+**别把帧压成 PNG 再喂管道。** 一张 1536×2048 的图，60 帧的 zlib 要 20.8 秒，
+而 x264 编完只要 0.2 秒 —— 压缩比编码本身贵一百倍，管道又不在乎那点字节。
+改成 rawvideo 直传后，同样的输出（逐字节一致）整批从 5 分钟降到 1 分 50 秒：
+
+| 阶段 | 1536×2048 | 2816×2048 |
+|---|---:|---:|
+| PIL 合成 60 帧 | 5.4 s | 14.1 s |
+| ~~PNG 序列化~~ → rawvideo | ~~20.8 s~~ → ≈0 | ~~24.7 s~~ → ≈0 |
+| x264 | 0.2 s | 7.6 s |
+| GIF 缩放+量化+写 | 2.3 s | 3.2 s |
+
+9 张有滚动层的地图，整批约 2 分钟。
 
 ### SpriteGlu 归档怎么定位
 
 引擎按资源名去查（`SPRITEGLU__BINARY_GLOBAL` 等），而包内的**资源名称目录还没解**。
-好在这块资源是自描述且连续的：global 里写着 archetype 数 N，后面紧跟 N 个 archetype、
+好在这块资源是自描述的：global 里写着 archetype 数 N，后面跟着 N 个 archetype、
 N 个 texture map，最后一个 `TEXTURE_MAP_GLOBAL` 又要正好是 `u16 + N` 字节。
 `locate_archive` 就靠这个形状去试，包里不会有第二处能凑巧对上。
 
-图集页是紧挨在 global 之前的那 `sum(pageCounts)` 个 PNG 资源；对不上时只告警不中断，
-免得一个包的异常挡住整批。
+但这四段在 table2 索引上不一定连着，1.0.0 把图集页塞在了 archetype 和 texture map 中间：
+
+| 版本 | 排布（pack2 为例） |
+|---|---|
+| 1.0.0 | global 138 → archetype 139-144 → **PNG 145-151** → texture map 152-157 → 158 |
+| 3.6.0 | **PNG 188-194** → global 195 → archetype 196-201 → texture map 202-207 → 208 |
+
+引擎按名字查，所以怎么排都无所谓。`locate_archive` 改成只在包的**二进制资源序列**上
+走位，图集页不在这个序列里，两种排布都还原成相邻的四段。
+
+图集页就是归档块内部、或紧挨 global 之前的那 `sum(pageCounts)` 个连续 PNG 资源；
+数量或连续性对不上时只告警不中断，免得一个包的异常挡住整批。

@@ -6,8 +6,8 @@ Source: ``CSpriteGlu::Init`` / ``LoadArcheType`` / ``LoadTexturePack`` /
 
 The engine looks these resources up by name (``SPRITEGLU__BINARY_GLOBAL`` and
 friends) through the pack's name directory, which is not decoded yet. They do
-not need it: the block is self-describing and contiguous, so
-``locate_archive`` finds it by structure instead.
+not need it: the block is self-describing, so ``locate_archive`` finds it by
+structure instead.
 """
 
 from dataclasses import dataclass
@@ -19,11 +19,17 @@ from big_tool.maps.stream import Stream, StreamError
 # Constants
 # ------------------------------------------------------------------
 
-# The block's layout in table2 order, which is what locate_archive matches:
+# The block's layout, which is what locate_archive matches:
 #   BINARY_GLOBAL
 #   BINARY_ARCHETYPE_000 .. _00N     (archetypeCount entries)
 #   BASE_TEXTURE_MAP_000 .. _00N     (archetypeCount entries)
 #   TEXTURE_MAP_GLOBAL
+#
+# The four parts are consecutive among the pack's binary resources, but not
+# always in table2 index: 1.0.0 stores the atlas pages between the archetypes
+# and the texture maps, while 2.4.0 and 3.6.0 put them right before the block.
+# The engine does not care either way, because CSpriteGlu::Init looks every
+# part up by name.
 
 # CProp::Bind builds three CSpritePlayers and draws them in this order.
 SPRITE_LAYERS = ("background", "main", "foreground")
@@ -154,6 +160,7 @@ class SpriteGluArchive:
     """Everything needed to draw a pack's sprites."""
 
     global_index: int
+    last_index: int
     sprite_slots: list[int]
     sprites: list[tuple[int, int, int]]
     archetypes: list[ArcheType]
@@ -340,35 +347,59 @@ def locate_archive(resources: dict[int, bytes]) -> SpriteGluArchive | None:
     texture-map resources parse exactly and the trailing page-count block
     agrees. Nothing else in a pack matches that shape by accident.
     """
-    for index in sorted(resources):
-        archive = _try_load_archive(resources, index)
+    binary_indexes = sorted(resources)
+    for position in range(len(binary_indexes)):
+        archive = _try_load_archive(resources, binary_indexes, position)
         if archive is not None:
             return archive
     return None
 
 
-def _try_load_archive(resources: dict[int, bytes], index: int) -> SpriteGluArchive | None:
-    """Load the archive that would start at one table2 index, or None."""
+def _try_load_archive(
+    resources: dict[int, bytes], binary_indexes: list[int], position: int
+) -> SpriteGluArchive | None:
+    """Load the archive that would start at one position of ``binary_indexes``.
+
+    The four parts follow each other among the pack's binary resources, which
+    is not the same as following each other in table2 index: 1.0.0 stores the
+    atlas pages between the archetypes and the texture maps, leaving a gap
+    there. ``binary_indexes`` lists only the binary resources, so the pages
+    drop out of the walk and both layouts stay adjacent.
+    """
     try:
-        slots, sprites, archetype_count = parse_global(resources[index])
+        slots, sprites, archetype_count = parse_global(resources[binary_indexes[position]])
     except (StreamError, IndexError):
         return None
     if archetype_count < 1 or not sprites:
         return None
 
-    archetype_start = index + 1
+    archetype_start = position + 1
     texture_map_start = archetype_start + archetype_count
-    page_count_index = texture_map_start + archetype_count
+    page_count_position = texture_map_start + archetype_count
+    if page_count_position >= len(binary_indexes):
+        return None
 
     try:
         archetypes = []
         for offset in range(archetype_count):
-            archetypes.append(parse_archetype(resources[archetype_start + offset], len(sprites)))
+            data = resources[binary_indexes[archetype_start + offset]]
+            archetypes.append(parse_archetype(data, len(sprites)))
         texture_maps = []
         for offset in range(archetype_count):
-            texture_maps.append(parse_texture_map(resources[texture_map_start + offset]))
-        page_counts = parse_page_counts(resources[page_count_index], archetype_count)
+            data = resources[binary_indexes[texture_map_start + offset]]
+            texture_maps.append(parse_texture_map(data))
+        page_counts = parse_page_counts(
+            resources[binary_indexes[page_count_position]], archetype_count
+        )
     except (StreamError, KeyError, IndexError):
         return None
 
-    return SpriteGluArchive(index, slots, sprites, archetypes, texture_maps, page_counts)
+    return SpriteGluArchive(
+        binary_indexes[position],
+        binary_indexes[page_count_position],
+        slots,
+        sprites,
+        archetypes,
+        texture_maps,
+        page_counts,
+    )

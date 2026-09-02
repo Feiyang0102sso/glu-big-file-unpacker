@@ -78,7 +78,7 @@ SCROLL_STEP_Y = 1
 # still closes the loop seamlessly.
 SCROLL_RATES = (1, 2, 3)
 
-# MP4: the full-resolution output. Frames are piped to ffmpeg as they are
+# MP4: the full-resolution output. Frames are piped to ffmpeg raw as they are
 # drawn, because holding 60 frames of a 2816x2048 map would cost gigabytes.
 FFMPEG_COMMAND = "ffmpeg"
 MP4_FPS = 30
@@ -229,20 +229,37 @@ def _load_sprite_archive(
         logger.warning(f"{pack_dir.name}: no SpriteGlu archive, props will be skipped")
         return None, []
 
-    # BASE_TEXTURE_PAGE_0 is the first of a contiguous run of PNG resources
-    # that ends right before the archive. Named lookup would give this
-    # directly, so the run is checked rather than assumed.
-    page_indexes = []
+    # BASE_TEXTURE_PAGE_0 heads a contiguous run of PNG resources, but the run
+    # sits in a different place per build: 2.4.0 and 3.6.0 put it right before
+    # the archive, 1.0.0 puts it inside, between the archetypes and the texture
+    # maps. Named lookup would give the pages directly, so the run is located
+    # and checked rather than assumed.
+    png_indexes = []
     for index, path in sorted(resource_files.items()):
         if path.suffix == ".png":
-            page_indexes.append(index)
-    page_indexes = page_indexes[-archive.total_pages:]
+            png_indexes.append(index)
 
-    expected_last = archive.global_index - 1
-    if len(page_indexes) != archive.total_pages or page_indexes[-1] != expected_last:
+    page_indexes = []
+    for index in png_indexes:
+        if archive.global_index < index < archive.last_index:
+            page_indexes.append(index)
+
+    if not page_indexes:
+        # Nothing inside the block, so the run is the one it starts after.
+        for index in png_indexes:
+            if index < archive.global_index:
+                page_indexes.append(index)
+        page_indexes = page_indexes[-archive.total_pages:]
+
+    pages_are_contiguous = False
+    if page_indexes:
+        span = page_indexes[-1] - page_indexes[0] + 1
+        pages_are_contiguous = span == len(page_indexes)
+
+    if len(page_indexes) != archive.total_pages or not pages_are_contiguous:
         logger.warning(
-            f"{pack_dir.name}: sprite pages do not sit right before the archive, "
-            f"props may be wrong"
+            f"{pack_dir.name}: expected {archive.total_pages} contiguous sprite "
+            f"pages but found {len(page_indexes)}, props may be wrong"
         )
 
     pages = []
@@ -538,14 +555,16 @@ def _write_animation(
 
     tile_width = assets.tileset.tile_width
     tile_height = assets.tileset.tile_height
-    encoder = _start_mp4(output_dir / f"{name}_bak.mp4")
+    columns, rows = game_map.grid_size()
+    size = (columns * tile_width, rows * tile_height)
+    encoder = _start_mp4(output_dir / f"{name}_bak.mp4", size)
 
     gif_frames = []
     for step in range(ANIMATION_FRAME_COUNT):
         shifts = _layer_shifts(layers, step, tile_width, tile_height)
         frame = render_map(game_map, assets, with_props, shifts, cache).convert("RGB")
         if encoder is not None:
-            frame.save(encoder[0].stdin, format="PNG")
+            encoder[0].stdin.write(frame.tobytes())
         if step % GIF_FRAME_STRIDE == 0:
             gif_frames.append(frame.resize(
                 (round(frame.width * GIF_SCALE), round(frame.height * GIF_SCALE)),
@@ -564,8 +583,14 @@ def _write_animation(
     )
 
 
-def _start_mp4(output_path: Path) -> tuple[subprocess.Popen, IO[bytes]] | None:
-    """Open an ffmpeg process fed a stream of PNG frames, or None if it is missing.
+def _start_mp4(
+    output_path: Path, size: tuple[int, int]
+) -> tuple[subprocess.Popen, IO[bytes]] | None:
+    """Open an ffmpeg process fed a stream of raw RGB frames, or None if it is missing.
+
+    Frames go over the pipe uncompressed. PNG-ing them first costs more than
+    the whole x264 encode does -- 20 seconds of zlib against 0.2 seconds of
+    encoding on a 1536x2048 map -- and the pipe does not care about the bytes.
 
     ffmpeg's diagnostics go to a temporary file rather than a pipe. A pipe
     nobody drains fills up after a few dozen frames, at which point ffmpeg
@@ -573,7 +598,9 @@ def _start_mp4(output_path: Path) -> tuple[subprocess.Popen, IO[bytes]] | None:
     """
     command = [
         FFMPEG_COMMAND, "-y", "-loglevel", "error", "-nostats",
-        "-f", "image2pipe", "-framerate", str(MP4_FPS), "-i", "-",
+        "-f", "rawvideo", "-pixel_format", "rgb24",
+        "-video_size", f"{size[0]}x{size[1]}",
+        "-framerate", str(MP4_FPS), "-i", "-",
         "-c:v", "libx264", "-preset", MP4_PRESET, "-crf", MP4_CRF,
         # yuv420p is what every player can decode; the maps are whole tiles
         # across, so the even-size requirement is always met.
