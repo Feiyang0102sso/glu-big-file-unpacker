@@ -7,6 +7,7 @@ from big_tool.analysis.search import SearchOptions, search_path
 from big_tool.big_archive.big_extractor import unpack_directory
 from big_tool.config import get_output_dir, init_app_env
 from big_tool.logger import logger
+from big_tool.maps.renderer import render_directory
 from big_tool.models.converter import convert_directory
 from big_tool.version import __version__
 
@@ -51,6 +52,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Root for the per-pack output folders "
              "(default: a _converted_models folder inside each pack)",
+    )
+
+    map_parser = subparsers.add_parser(
+        "map-render",
+        help="Render every TILELAYER map of each pack, tiles and props (needs --by-section)",
+    )
+    map_parser.add_argument("input", type=Path)
+    map_parser.add_argument(
+        "--output",
+        type=Path,
+        help="Root for the per-pack output folders "
+             "(default: a _rendered_maps folder inside each pack)",
+    )
+    map_parser.add_argument("--no-props", action="store_true", help="Draw the tile layers only")
+    map_parser.add_argument(
+        "--lava-gif",
+        action="store_true",
+        help="Also write an animated loop for maps with a scrolling tile layer",
     )
     return parser
 
@@ -107,6 +126,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "model-convert":
         count = convert_directory(args.input, args.output)
         logger.info(f"Converted {count} model files")
+        return 0
+
+    if args.command == "map-render":
+        count = render_directory(
+            args.input,
+            args.output,
+            with_props=not args.no_props,
+            lava_gif=args.lava_gif,
+        )
+        logger.info(f"Rendered {count} maps")
         return 0
 
     return 1
