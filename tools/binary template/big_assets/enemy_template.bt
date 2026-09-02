@@ -3,30 +3,13 @@
 //
 //      File: enemy_template.bt
 //   Authors: Feiyang
-//   Version: 0.5
-//   Purpose: Roughly inspect one Gun Bros enemy template.
+//   Version: 1.0
+//   Purpose: Gun Bros enemy template.
 //  Category: Game / Big Assets
-// File Mask: pack1_xga_0048_0x5457.bin
+// File Mask: *.bin
 //------------------------------------------------
 
 /*
-    Sample file:
-        pack1_xga_0048_0x5457.bin
-
-    The compiled Flow Script is only colored and is not decoded.
-    Its length varies per enemy, so it is measured instead of hardcoded.
-
-    Everything else follows the read order of CEnemy::Template::Init:
-
-        ubyte             debug script flag
-        CGameAssetRef     display name string
-        CScript           compiled flow script
-        CMoveSetMesh      meshes, textures and animation moves
-        GameObjectRef     bullet fired by this enemy
-        uint16 uint16     experience and Xplodium paid on death
-        ubyte  ubyte      unread flag, collision radius
-        uint16 uint16     draw scale and UI scale, both percent
-        CCollisionData    hit segments, empty when the radius is used instead
 */
 
 LittleEndian();
@@ -37,11 +20,73 @@ LittleEndian();
 // ------------------------------------------------
 
 const int COLOR_FLAG = 0xD0D0D0;
-const int COLOR_REFERENCE = 0xFFE0B2;
+const int COLOR_REFERENCE_TXT = 0xFFE0B2;
 const int COLOR_SCRIPT = 0xD7C6FF;
+const int COLOR_MESH_CONFIG = 0x28FF2F;
 const int COLOR_MOVE_SET = 0xC8E6C9;
+const int COLOR_REFERENCE_BULLET = 0xFFA3A4;
 const int COLOR_STATS = 0xB3E5FC;
-const int COLOR_COLLISION = 0xE1D5C4;
+const int COLOR_COLLISION = 0x6DA0FF;
+
+
+// ------------------------------------------------
+// Common-refs
+// ------------------------------------------------
+
+/*
+    8X 75 26 00 Y
+
+    X = pack number [0,9]
+    Y = Yth type resource in this .big
+    Y varies from 1-4 bytes
+
+    2X 58 67 01 Y
+
+    X + 10 = pack number [10,19]
+*/
+
+int packNumberFromHash(uint32 packHash) {
+    local ubyte firstHashByte = packHash & 0xFF;
+    local int firstDigit = firstHashByte >> 4;
+    local int secondDigit = firstHashByte & 0x0F;
+
+    if (firstDigit == 8) {
+        return secondDigit;
+    }
+
+    if (firstDigit == 2) {
+        return secondDigit + 10;
+    }
+
+    return -1;
+}
+
+
+string packHashFormat(uint32 packHash) {
+    local int packNumber = packNumberFromHash(packHash);
+    local string result;
+
+    if (packNumber >= 0) {
+        SPrintf(result, "pack%d", packNumber);
+        return result;
+    }
+
+    SPrintf(result, "packHash 0x%08X", packHash);
+
+    return result;
+}
+
+
+string resourceIndexFormat(int resourceIndex, string resourceType) {
+    local string result;
+
+    SPrintf(result, "%s %d", resourceType, resourceIndex);
+
+    return result;
+}
+
+
+typedef uint32 PackHash <format=hex, read=packHashFormat(this)>;
 
 
 // ------------------------------------------------
@@ -49,49 +94,21 @@ const int COLOR_COLLISION = 0xE1D5C4;
 // ------------------------------------------------
 
 struct TemplateFlag{
-    ubyte debugScriptEnabled <format=decimal, bgcolor=COLOR_FLAG>;
+    ubyte debugScriptEnabled <format=decimal>;
 } ;
 
 
 // ------------------------------------------------
-// Part 2: Common 8-byte refs
+// Part 2: string refs
 // ------------------------------------------------
 
-/*
-8X 75 26 00 Y
-
-X = pack number [0,9]
-Y = Yth type resource in this .big
-Y varies from 1-4 bytes
-*/
-
-const uint32 STANDARD_PACK_HASH_BASE = 0x00267580;
-const int STANDARD_PACK_MAX_NUMBER = 9;
-
 typedef struct {
-    uint32 stringPackHash <format=hex>;
-    int32 stringIndex <format=hex>; // Zero-based. -1 means unused.
-} CommonStringRef <read=commonStringRefFormat>;
-
-
-string commonStringRefFormat(CommonStringRef &reference) {
-    local int packNumber = reference.stringPackHash - STANDARD_PACK_HASH_BASE;
-    local string result;
-
-    if (packNumber >= 0 && packNumber <= STANDARD_PACK_MAX_NUMBER) {
-        SPrintf(result, "pack%d str %d", packNumber, reference.stringIndex);
-        return result;
-    }
-
-    SPrintf(
-        result,
-        "packHash 0x%08X str %d",
-        reference.stringPackHash,
-        reference.stringIndex
-    );
-
-    return result;
-}
+    PackHash stringPackHash;
+    int32 stringIndex <
+        format=hex,
+        read=resourceIndexFormat(this, "str")
+    >; // Zero-based. -1 means unused.
+} CommonStringRef;
 
 
 // ------------------------------------------------
@@ -99,12 +116,8 @@ string commonStringRefFormat(CommonStringRef &reference) {
 // ------------------------------------------------
 
 /*
-    Runner sample:
-        start = 0x09
-        end   = 0x1B9
-        size  = 432 bytes
 
-    Other enemies can have a different script size. The size is not stored
+    different script size. The size is not stored
     anywhere, so it is recovered by walking the length prefixes CScript::Load
     reads:
 
@@ -196,31 +209,49 @@ int64 flowScriptSize(int64 startPos) {
 
 struct CompiledFlowScript{
     local int64 scriptSize = flowScriptSize(FTell());
-    ubyte data[scriptSize] <format=hex, bgcolor=COLOR_SCRIPT>;
+    ubyte data[scriptSize] <format=hex>;
 } ;
 
 
 // ------------------------------------------------
-// Part 4: Move set mesh
+// Part 4: Move set mesh configuration
 // ------------------------------------------------
 
-/*
-    CMoveSetMesh::Init.
-
-    A MeshConfig pairs one mesh with one texture. Both bytes are Section local
-    indexes: the engine adds the pack base of the MODEL Section (0x1E) to
-    meshIndex and the base of the PNG Section (0x1C) to textureIndex.
-
-    A move is one animation clip played on one of those meshes. Its frame
-    numbers index the mesh keyframe timeline, so a single mesh can carry every
-    move of the enemy.
-*/
+// how many meshes got involved in this enemy
 
 typedef struct {
     ubyte meshIndex <format=decimal>;
     ubyte textureIndex <format=decimal>;
 } MeshConfig <read=meshConfigFormat>;
 
+
+struct MoveSetMeshConfig{
+    PackHash meshPackHash;
+
+    ubyte meshConfigCount <format=decimal>;
+    if (meshConfigCount > 0) {
+        MeshConfig meshConfigs[meshConfigCount] <optimize=false>;
+    }
+} ;
+
+
+string meshConfigFormat(MeshConfig &config) {
+    local string result;
+    SPrintf(result, "mesh %d texture %d", config.meshIndex, config.textureIndex);
+    return result;
+}
+
+
+// ------------------------------------------------
+// Part 5: Moves
+// ------------------------------------------------
+
+/*
+    A move is one animation clip played on one of the configured meshes. Its
+    frame numbers index the mesh keyframe timeline, so a single mesh can carry
+    every move of the enemy.
+    Not every animation in mesh file is used.
+*/
 
 typedef struct {
     uint16 frameNumber <format=decimal>;
@@ -240,7 +271,7 @@ typedef struct {
     // 16.16 fixed point, multiplied into the frame delta time.
     int32 playbackSpeed;
 
-    // Read into the move but never used by any 3.6.0 code path. Zero in every
+    // Not used. Zero in every
     // enemy template, one in a few gun moves.
     uint32 unusedField;
 
@@ -251,26 +282,12 @@ typedef struct {
 } MoveEntry <read=moveEntryFormat>;
 
 
-struct MoveSetMesh{
-    uint32 meshPackHash <format=hex>;
-
-    ubyte meshConfigCount <format=decimal>;
-    if (meshConfigCount > 0) {
-        MeshConfig meshConfigs[meshConfigCount] <optimize=false>;
-    }
-
+struct MoveSetMoves{
     ubyte moveCount <format=decimal>;
     if (moveCount > 0) {
         MoveEntry moves[moveCount] <optimize=false>;
     }
 } ;
-
-
-string meshConfigFormat(MeshConfig &config) {
-    local string result;
-    SPrintf(result, "mesh %d texture %d", config.meshIndex, config.textureIndex);
-    return result;
-}
 
 
 string moveEventFormat(MoveEvent &event) {
@@ -299,83 +316,52 @@ string moveEntryFormat(MoveEntry &move) {
 
 
 // ------------------------------------------------
-// Part 5: Bullet reference
+// Part 6: Bullet reference
 // ------------------------------------------------
 
-/*
-    IGameObject::GameObjectRef::Init. The object id byte is only stored when
-    the pack hash is set, so this block is four or five bytes long.
-
-    CEnemy::Bind resolves it as game object type 3, which is BULLET.
-*/
+// ref to a bullet
+// melee have no bullet (00 00 00 00)
 
 typedef struct {
-    uint32 bulletPackHash <format=hex>;
+    PackHash bulletPackHash;
     if (bulletPackHash != 0) {
-        ubyte bulletObjectId <format=decimal>;
+        ubyte bulletObjectId <
+            format=decimal,
+            read=resourceIndexFormat(this, "bullet")
+        >;
     }
-} BulletReference <read=bulletReferenceFormat>;
-
-
-string bulletReferenceFormat(BulletReference &reference) {
-    local int packNumber = reference.bulletPackHash - STANDARD_PACK_HASH_BASE;
-    local string result;
-
-    if (reference.bulletPackHash == 0) {
-        return "no bullet";
-    }
-
-    if (packNumber >= 0 && packNumber <= STANDARD_PACK_MAX_NUMBER) {
-        SPrintf(result, "pack%d bullet %d", packNumber, reference.bulletObjectId);
-        return result;
-    }
-
-    SPrintf(
-        result,
-        "packHash 0x%08X bullet %d",
-        reference.bulletPackHash,
-        reference.bulletObjectId
-    );
-
-    return result;
-}
+} BulletReference;
 
 
 // ------------------------------------------------
-// Part 6: Stats
+// Part 7: Stats
 // ------------------------------------------------
 
 struct EnemyStats{
-    // Both rewards pass through the armour, promo and friend multipliers in
-    // CLevel::OnEnemyKilled before reaching the player.
+    //EXP Xplodium
     uint16 experienceReward <format=decimal>;
     uint16 xplodiumReward <format=decimal>;
 
-    // Copied to CEnemy+864 and never read back in 3.6.0. It is zero only on
-    // templates that pay no reward at all, which is as far as the code goes.
-    ubyte unreadFlag <format=decimal>;
+    // no reward enemy got 0 (eg pack1 0026) while others got 1
+    // some else got -1, unknown
+    ubyte isReward <format=decimal>;
 
-    // CEnemy::GetRadius, used when the collision data below is empty.
+    // used when the collision data below is empty.
     ubyte collisionRadius <format=decimal>;
 
-    // Percentages. The first scales the drawn mesh, the second the HUD icon.
+    // drawn percentages in game
     uint16 drawScalePercent <format=decimal>;
+    // drawn percentages in UI/casualty page
     uint16 uiScalePercent <format=decimal>;
 } ;
 
 
 // ------------------------------------------------
-// Part 7: Collision data
+// Part 8: Collision data
 // ------------------------------------------------
 
-/*
-    CCollisionData::Load. The points are the outline of the enemy and every
-    segment joins two of them, which is what CCollisionData::TestRay
-    intersects. partId groups segments so a script can switch one body part
-    on or off.
-
-    Most enemies store no points at all and fall back to collisionRadius.
-*/
+// most doesnt use these field
+// one exception is pack1 0026, unused enemy, minitank
 
 typedef struct {
     int32 x;
@@ -429,14 +415,12 @@ string collisionSegmentFormat(CollisionSegment &segment) {
 // Main
 // ------------------------------------------------
 
-TemplateFlag templateFlag;
-
-// CEnemy::Template::CreateNameString reads this one as the displayed name.
-CommonStringRef nameStringReference <bgcolor=COLOR_REFERENCE>;
-
-CompiledFlowScript compiledFlowScript;
-MoveSetMesh moveSetMesh <bgcolor=COLOR_MOVE_SET>;
-BulletReference bulletReference <bgcolor=COLOR_REFERENCE>;
+TemplateFlag templateFlag <bgcolor=COLOR_FLAG>;
+CommonStringRef nameStringReference <bgcolor=COLOR_REFERENCE_TXT>;
+CompiledFlowScript compiledFlowScript <bgcolor=COLOR_SCRIPT>;
+MoveSetMeshConfig moveSetMeshConfig <bgcolor=COLOR_MESH_CONFIG>;
+MoveSetMoves moveSetMoves <bgcolor=COLOR_MOVE_SET>;
+BulletReference bulletReference <bgcolor=COLOR_REFERENCE_BULLET>;
 EnemyStats enemyStats <bgcolor=COLOR_STATS>;
 CollisionData collisionData <bgcolor=COLOR_COLLISION>;
 
