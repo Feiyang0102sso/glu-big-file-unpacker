@@ -1,0 +1,7 @@
+# Runtime dependencies
+pillow>=10.0
+tkinterdnd2>=0.4
+
+# Windows one-file build dependencies. The onefile extra installs zstandard.
+nuitka[onefile]>=2.0
+ordered-set>=4.1.0

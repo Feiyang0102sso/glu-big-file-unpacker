@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DIST_DIR = PROJECT_ROOT / "dist"
 VERSION_FILE = PROJECT_ROOT / "src" / "big_tool" / "version.py"
 ENTRY_FILE = PROJECT_ROOT / "src" / "big_tool" / "app" / "main.py"
-ICON_FILE = PROJECT_ROOT / "resources" / "BigTool.ico"
+ICON_FILE = PROJECT_ROOT / "assets" / "BigTool.ico"
 
 
 def main() -> int:
