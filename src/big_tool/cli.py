@@ -1,10 +1,15 @@
-"""Command-line entry point for big-tool."""
+"""Command-line entry point for big-tool.
+
+The command bodies live in ``run_*`` functions so that another front end can
+run the same work without going through argparse.
+"""
 
 import argparse
+from collections.abc import Callable
 from pathlib import Path
 
 from big_tool.analysis.search import SearchOptions, search_path
-from big_tool.big_archive.big_extractor import unpack_directory
+from big_tool.big_archive.big_extractor import ExtractionResult, unpack_directory
 from big_tool.config import get_output_dir, init_app_env
 from big_tool.logger import logger
 from big_tool.maps.renderer import render_directory
@@ -87,26 +92,89 @@ def _confirm_cleanup(target_dirs: list[Path]) -> bool:
     return answer in {"y", "yes"}
 
 
+# ------------------------------------------------------------------
+# Commands, shared with the windowed front end
+# ------------------------------------------------------------------
+
+
+def run_unpack(
+    input_dir: Path,
+    output_dir: Path | None = None,
+    recursive: bool = True,
+    clean: bool = True,
+    assume_yes: bool = False,
+    confirm: Callable[[list[Path]], bool] | None = None,
+    by_section: bool = False,
+) -> list[ExtractionResult]:
+    """Extract every archive under a directory.
+
+    An empty result means nothing was unpacked: either the directory holds no
+    archive, or the user turned down the cleanup.
+    """
+    if output_dir is None:
+        output_dir = get_output_dir(input_dir)
+
+    return unpack_directory(
+        input_dir,
+        output_dir=output_dir,
+        recursive=recursive,
+        clean=clean,
+        assume_yes=assume_yes,
+        confirm=confirm,
+        by_section=by_section,
+    )
+
+
+def failed_resource_count(results: list[ExtractionResult]) -> int:
+    """Return how many resources failed across every archive."""
+    failed_count = 0
+    for result in results:
+        failed_count += result.failed_count
+    return failed_count
+
+
+def run_model_convert(input_dir: Path, output_dir: Path | None = None) -> int:
+    """Convert the meshes of every MODEL section under a directory."""
+    count = convert_directory(input_dir, output_dir)
+    logger.info(f"Converted {count} model files")
+    return count
+
+
+def run_map_render(
+    input_dir: Path,
+    output_dir: Path | None = None,
+    with_props: bool = True,
+    animated_background: bool = False,
+) -> int:
+    """Render every TILELAYER map under a directory."""
+    count = render_directory(
+        input_dir,
+        output_dir,
+        with_props=with_props,
+        animated_background=animated_background,
+    )
+    logger.info(f"Rendered {count} maps")
+    return count
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the selected command."""
     init_app_env()
     args = build_parser().parse_args(argv)
 
     if args.command == "unpack":
-        output_dir = args.output or get_output_dir(args.input)
-        results = unpack_directory(
+        results = run_unpack(
             args.input,
-            output_dir=output_dir,
+            output_dir=args.output,
             recursive=not args.no_recursive,
             clean=not args.no_clean,
             assume_yes=args.yes,
             confirm=_confirm_cleanup,
             by_section=args.by_section,
         )
-        failed_count = 0
-        for result in results:
-            failed_count += result.failed_count
-        return 1 if failed_count else 0
+        if failed_resource_count(results):
+            return 1
+        return 0
 
     if args.command == "search":
         options = SearchOptions(
@@ -125,18 +193,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "model-convert":
-        count = convert_directory(args.input, args.output)
-        logger.info(f"Converted {count} model files")
+        run_model_convert(args.input, args.output)
         return 0
 
     if args.command == "map-render":
-        count = render_directory(
+        run_map_render(
             args.input,
             args.output,
             with_props=not args.no_props,
             animated_background=args.ani_bak,
         )
-        logger.info(f"Rendered {count} maps")
         return 0
 
     return 1

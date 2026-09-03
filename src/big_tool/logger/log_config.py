@@ -1,5 +1,6 @@
 """big-tool universal config"""
 from collections.abc import Callable
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 import sys
@@ -11,6 +12,42 @@ STDOUT_HANDLER_NAME = "console_stdout"
 STDERR_HANDLER_NAME = "console_stderr"
 FILE_ONLY_RECORD_ATTRIBUTE = "file_only"
 
+ANSI_RESET = "\033[0m"
+
+
+@dataclass(frozen=True)
+class LevelColor:
+    """One log level in both flavours a view may need."""
+
+    # The console escape sequence.
+    ansi: str
+    # The same color as a widget reads it, plus an optional band behind it.
+    foreground: str
+    background: str = ""
+
+
+# The one color table of the project: the console formatter takes the escape
+# codes, a window takes the hex values, and neither can drift from the other.
+LEVEL_COLORS = {
+    logging.DEBUG: LevelColor(ansi="\033[36m", foreground="#56b6c2"),
+    logging.INFO: LevelColor(ansi="\033[32m", foreground="#98c379"),
+    logging.WARNING: LevelColor(ansi="\033[33m", foreground="#e5c07b"),
+    logging.ERROR: LevelColor(ansi="\033[31m", foreground="#e06c75"),
+    logging.CRITICAL: LevelColor(
+        ansi="\033[41m",
+        foreground="#ffffff",
+        background="#a00000",
+    ),
+}
+
+
+def ansi_color_of(level: int) -> str:
+    """Return the console escape that colors one log level."""
+    level_color = LEVEL_COLORS.get(level)
+    if level_color is None:
+        return ""
+    return level_color.ansi
+
 _before_console_output: Callable[[], None] | None = None
 _after_console_output: Callable[[], None] | None = None
 
@@ -19,15 +56,6 @@ class ColoredFormatter(logging.Formatter):
     """
     Provide different colors based on log levels.
     """
-
-    COLORS = {
-        logging.DEBUG: "\033[36m",
-        logging.INFO: "\033[32m",
-        logging.WARNING: "\033[33m",
-        logging.ERROR: "\033[31m",
-        logging.CRITICAL: "\033[41m",
-    }
-    RESET = "\033[0m"
 
     def __init__(self, use_color: bool = True):
         """Drop the color codes when the console cannot parse them."""
@@ -38,8 +66,8 @@ class ColoredFormatter(logging.Formatter):
         color = ""
         reset = ""
         if self._use_color:
-            color = self.COLORS.get(record.levelno, "")
-            reset = self.RESET
+            color = ansi_color_of(record.levelno)
+            reset = ANSI_RESET
 
         log_fmt = f"{color}[%(asctime)s.%(msecs)03d] [%(levelname)s]"
 

@@ -81,6 +81,10 @@ SCROLL_RATES = (1, 2, 3)
 # MP4: the full-resolution output. Frames are piped to ffmpeg raw as they are
 # drawn, because holding 60 frames of a 2816x2048 map would cost gigabytes.
 FFMPEG_COMMAND = "ffmpeg"
+
+# Windows gives every child process its own console window unless told not to,
+# which flashes a black box over the app once per encoded map.
+NO_CONSOLE_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 MP4_FPS = 30
 MP4_CRF = "16"
 MP4_PRESET = "slow"
@@ -611,6 +615,7 @@ def _start_mp4(
     try:
         process = subprocess.Popen(
             command, stdin=subprocess.PIPE, stdout=log, stderr=log,
+            creationflags=NO_CONSOLE_WINDOW,
         )
     except FileNotFoundError:
         log.close()
